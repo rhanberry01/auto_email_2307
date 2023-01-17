@@ -1,0 +1,367 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+//--------------------------------------------------------------------------------
+
+// Base function for adding a GL transaction
+// $date_ is display date (non-sql)
+// $amount is in $currency currency
+// if $currency is not set, then defaults to no conversion
+
+function is_new_cv_no($cv_no)
+{
+	$sql = "SELECT cv_no FROM ".TB_PREF."cv_header
+				WHERE cv_no=".db_escape($cv_no);
+				
+	$result = db_query($sql, "could not test for unique cv_no");	
+	return (db_num_rows($result) == 0);
+}
+
+function insert_cv($cv_no,$cv_date,$amount,$person_type,$person_id, $cv_trans,$cv_due_date,$ewt=0)
+{
+	begin_transaction();
+	$sql = "INSERT INTO ".TB_PREF."cv_header(cv_no,cv_date, due_date, amount, ewt, person_type,person_id)
+				VALUES (".db_escape($cv_no).",'".date2sql($cv_date)."','".date2sql($cv_due_date)."',$amount, ".($ewt+0) .", $person_type,".db_escape($person_id).")";
+	db_query($sql,'failed to insert cv header');
+	$cv_id = db_insert_id();
+	foreach($cv_trans as $tran)
+	{
+		insert_cv_details($cv_id, $tran[0], $tran[1], $tran[2],$cv_date);
+	}
+	
+	add_reference(ST_CV, $cv_id, $cv_no);
+	add_comments(ST_CV, $cv_id, $cv_date, $_POST['memo_']);
+	add_audit_trail(ST_CV, $cv_id, $cv_date, 'CV created');
+	commit_transaction();
+	
+	return $cv_id;
+}
+
+function insert_cv_details($cv_id, $trans_type, $trans_no, $amount, $tran_date = '')
+{
+	$sql = "INSERT INTO ".TB_PREF."cv_details(cv_id, trans_type, trans_no, amount)
+				VALUES($cv_id, $trans_type, $trans_no, ".round2($amount,2).")";
+	db_query($sql,'failed to insert cv detail');
+
+	$sql = "UPDATE ".TB_PREF."supp_trans SET cv_id=$cv_id
+				WHERE type=$trans_type AND trans_no=$trans_no";
+	db_query($sql,'failed to update cv_id of supp trans');
+	
+	if ($trans_type == 52 OR $trans_type == 53)
+	{
+		post_gl_trans($trans_type, $trans_no, $tran_date);
+	}
+}
+
+function get_cv_header($id)
+{
+	$sql = "SELECT * FROM  ".TB_PREF."cv_header
+				WHERE id = $id";
+	
+	$result = db_query($sql,"Failed to retrieve cv header");
+	return db_fetch($result);
+}
+
+function get_cv_no($id)
+{
+	$sql = "SELECT cv_no FROM  ".TB_PREF."cv_header
+				WHERE id = $id";
+	
+	$result = db_query($sql,"Failed to retrieve cv header");
+	
+	if (db_num_rows($result)==0)
+		return '';
+		
+	$row = db_fetch($result);
+	return $row[0];
+}
+
+function get_cv_date($id)
+{
+	$sql = "SELECT cv_date FROM  ".TB_PREF."cv_header
+				WHERE id = $id";
+	
+	$result = db_query($sql,"Failed to retrieve cv header");
+	$row = db_fetch($result);
+	return $row[0];
+}
+
+function get_cv_header_by_bank_trans_id($bank_trans_id)
+{
+	$sql = "SELECT * FROM  ".TB_PREF."cv_header
+				WHERE bank_trans_id = ".db_escape($bank_trans_id);
+	$result = db_query($sql, "Failed to retrieve cv header using bank_trans_id");
+	return db_fetch($result);
+}
+
+function get_cv_details($id, $additional='')
+{
+	$sql = "SELECT * FROM  ".TB_PREF."cv_details
+				WHERE cv_id = $id 
+				$additional";
+	$result = db_query($sql,"Failed to retrieve cv details");
+	return $result;
+}
+
+function get_cv_rr($id)
+{
+	$sql = "SELECT DISTINCT d.reference
+			FROM ".TB_PREF."cv_details a , ".TB_PREF."supp_invoice_items b, ".TB_PREF."grn_items c, ".TB_PREF."grn_batch d
+			WHERE cv_id = $id
+			AND a.trans_no = b.supp_trans_no
+			AND a.trans_type = b.supp_trans_type
+			AND a.trans_type = 20
+			AND b.grn_item_id = c.id
+			AND c.grn_batch_id = d.id";
+	$result = db_query($sql,"Failed to retrieve cv RR no");
+	
+	$rr = array();
+	while($row = db_fetch($result))
+		$rr[] = ltrim($row[0],0);
+	
+	return implode(',',$rr);
+	
+}
+
+function get_all_cv_all_rr($where_clause)
+{
+	$sql = "SELECT DISTINCT x.id,d.reference
+			FROM 0_cv_header x, 0_cv_details a , 0_supp_invoice_items b, 0_grn_items c,
+				0_grn_batch d
+			$where_clause 
+			AND x.id = a.cv_id
+			AND a.trans_no = b.supp_trans_no
+			AND a.trans_type = b.supp_trans_type
+			AND a.trans_type = 20
+			AND b.grn_item_id = c.id
+			AND c.grn_batch_id = d.id";
+	// display_error($sql);die;
+	$result = db_query($sql);
+	
+	$cv_rr = array();
+	while($row = db_fetch($result))
+		$cv_rr[$row['id']] = array(ltrim($row['reference'],0));
+	
+	return $cv_rr;
+}
+
+function get_cv_details_total($id)
+{
+	$sql = "SELECT SUM(amount) FROM  ".TB_PREF."cv_details
+				WHERE cv_id = $id";
+	
+	$result = db_query($sql,"Failed to retrieve cv details");
+	$row = db_fetch($result);
+	return $row[0];
+}
+
+function get_tran_details($type, $trans_no)
+{
+	$sql = "SELECT * FROM ".TB_PREF."supp_trans 
+				WHERE type = $type
+				AND trans_no = $trans_no";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row;
+}
+
+function cv_has_payment($id)
+{
+	$sql = "SELECT bank_trans_id FROM ".TB_PREF."cv_header 
+				WHERE id = $id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return ($row[0] != 0);
+}
+
+function void_cv($cv_id)
+{
+	$res = get_cv_details($cv_id, ' AND trans_type IN (52,53)');
+	
+	while ($row = db_fetch($res))
+	{
+		$sql = "DELETE FROM ".TB_PREF."gl_trans
+				WHERE type = ".$row['trans_type']."
+				AND type_no = ".$row['trans_no'];
+		db_query($sql,'failed to delete temp gl trans');
+		
+		$sql = "UPDATE ".TB_PREF."gl_trans_temp SET 
+				posted = 0
+				WHERE type = ".$row['trans_type']."
+				AND type_no = ".$row['trans_no'];
+		db_query($sql,'failed to update temp gl trans');
+	}
+	
+	$sql = "UPDATE ".TB_PREF."cv_details SET voided=1 WHERE cv_id=$cv_id";
+	db_query($sql,'failed to void cv details');
+	
+	$sql = "UPDATE ".TB_PREF."cv_header SET amount=0 WHERE id=$cv_id";
+	db_query($sql,'failed to void cv header');
+	
+	//---- supp_trans
+	$sql = "UPDATE ".TB_PREF."supp_trans SET cv_id=0 WHERE cv_id=$cv_id";
+	db_query($sql,'failed to set cv_id to 0 for supp_trans');
+}
+
+function get_next_cv_no($is_trade=true)
+{
+	$sql = "SELECT cv_no FROM ".TB_PREF."cv_header ORDER BY id DESC";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	$reference = $row[0];
+	
+	$reference = str_replace('NT','',$reference);
+	
+	if (!$is_trade)
+		$reference = 'NT'.$reference;
+
+	if (preg_match('/^(\D*?)(\d+)(.*)/', $reference, $result) == 1) 
+	{
+		list($all, $prefix, $number, $postfix) = $result;
+		$dig_count = strlen($number); // How many digits? eg. 0003 = 4
+		$fmt = '%0' . $dig_count . 'd'; // Make a format string - leading zeroes
+		$nextval =  $number + 1; // Add one on, and put prefix back on
+		return $prefix.$nextval.$postfix;
+	}
+	else
+	{
+		if ($reference != '')
+			return $reference;
+		else
+			return "1";
+	}	
+}
+
+function get_cv_of_trans($type, $trans_no)
+{
+	$sql = "SELECT a.cv_no FROM `0_cv_header`a , 0_cv_details b
+				WHERE a.id = b.cv_id
+				AND trans_type = $type
+				AND trans_no = $trans_no";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row[0];
+}
+
+function get_cv_payment_date($cv_id)
+{
+	$sql = "SELECT b.trans_date FROM ".TB_PREF."cv_header a, ".TB_PREF."bank_trans b
+			WHERE a.id = $cv_id
+			AND a.bank_trans_id = b.id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row[0];
+}
+// ======================== CSV 
+
+function get_csv_header($id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."csv
+				WHERE id = $id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row;
+}
+
+function get_csv_details($id)
+{
+	$sql = "SELECT b.* FROM 0_csv_details a, 0_cv_header b
+				WHERE csv_id=$id
+				AND a.cv_id = b.id";
+	$res = db_query($sql);
+	return $res;
+}
+
+function get_csv_amount($id)
+{
+	$sql = "SELECT SUM(amount) FROM 0_csv_details a, 0_cv_header b
+				WHERE csv_id=$id
+				AND a.cv_id = b.id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row[0];
+}
+
+//-------
+
+function get_check_batch($batch_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."check_issue_batch
+			WHERE id = $batch_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row;
+}
+
+function get_check_batch_details($batch_id)
+{
+	$sql = "SELECT b.*, a.bank_trans_id as bank_trans_id2 FROM ".TB_PREF."check_issue_batch_cv a , ".TB_PREF."cv_header b
+			WHERE batch_id = $batch_id
+			AND a.cv_id = b.id
+			AND a.bank_trans_id != 0";
+	display_error($sql);
+	$res = db_query($sql);
+	return $res;
+}
+
+function get_check_batch_amount($batch_id)
+{
+	$sql = "SELECT cv_id FROM ".TB_PREF."check_issue_batch_cv
+			WHERE batch_id = $batch_id
+			AND bank_trans_id != 0";
+	// display_error($sql);
+	$res = db_query($sql);
+	$cvs = array();
+	while ($row = db_fetch($res))
+	{
+		$cvs[] = $row[0];
+	}
+	
+	if (count($cvs) == 0)
+		return 0;
+	
+	$sql = "SELECT SUM(amount) FROM 0_cv_header
+				WHERE id IN (".implode(',',$cvs).")";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row[0];
+	
+}
+
+function get_bank_trans_cheque_details($bank_trans_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."cheque_details
+			WHERE bank_trans_id = $bank_trans_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return $row;
+}
+
+function get_cv_del_date($cv_id)
+{
+	$sql = "SELECT DISTINCT del_date FROM 0_cv_details a, 0_supp_trans b
+					WHERE  a.cv_id = $cv_id
+					AND trans_type = 20
+					AND a.trans_type = b.type
+					AND a.trans_no = b.trans_no
+					ORDER BY  1 ASC";
+	$res = db_query($sql);
+	
+	$dates_ = array();
+	while($row = db_fetch($res))
+		$dates_[] = sql2date($row[0]);
+	
+	return implode(',',$dates_);
+}
+
+?>

@@ -1,0 +1,319 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+$page_security = 'SA_GLSETUP';
+
+$path_to_root = "..";
+include($path_to_root . "/includes/session.inc");
+
+include($path_to_root . "/includes/ui.inc");
+
+$js = "";
+if ($use_popup_windows)
+	$js .= get_js_open_window(900, 600);
+if ($use_date_picker)
+	$js .= get_js_date_picker();
+
+	
+page('Fix APV Purchase VAT and VAT', false, false, "", $js);
+set_time_limit(0);
+//-----------------------------------------------------------------------------------
+
+
+if (isset($_POST['fix_now']))
+{
+	
+	// delete gl trans without supp trans
+	$sql = "DELETE FROM 0_gl_trans
+					WHERE type = 24
+					AND type_no NOT IN(SELECT trans_no FROM 0_supp_trans WHERE type = 24)";
+	db_query($sql,'failed to delete GL of CWO without transactions');
+	
+	// fix gl person type and id
+	$sql = "UPDATE 0_gl_trans
+				SET person_type_id = 3,
+					person_id = (select supplier_id 
+											FROM 0_supp_trans x WHERE x.type = 0_gl_trans.type 
+											AND trans_no = type_no)
+				WHERE type IN (20, 22, 24, 52, 53)";
+	db_query($sql,'failed to copy supp trans supp id to gl');
+	//====================================================================
+	
+	$company_pref = get_company_prefs();
+	$sql = "SELECT DISTINCT c.type, c.trans_no, b.gst_no, b.supp_name, b.supplier_id,
+						a.tran_date, c.del_date, c.supp_reference, c.ov_amount + c.ov_gst as total, b.tax_group_id
+					FROM 0_gl_trans a, 0_suppliers b, 0_supp_trans c
+					WHERE a.tran_date >= '".date2sql($_POST['from'])."'
+					AND a.tran_date <= '".date2sql($_POST['to'])."'
+					AND (account = '5400' OR account = '5450' OR account = '1410010')
+					AND amount > 0
+					AND ((a.type = 20 AND c.type = 20) OR (a.type = 24 AND c.type = 24))
+					AND a.person_id = b.supplier_id
+					AND a.type_no = c.trans_no
+					AND a.type = c.type
+					ORDER BY supp_name,gst_no, c.del_date";
+	// display_error($sql);
+					// AND b.supplier_id = 53
+	$res = db_query($sql,'error.');
+	
+	$counter = 0;
+	while ($row = db_fetch($res))
+	{
+		$counter ++;
+		
+		$vat = $p_nv = $p_v = 0;
+		
+		$p_nv = get_gl_trans_amount($row['type'], $row['trans_no'], $company_pref["purchase_non_vat"]);
+		$p_v = get_gl_trans_amount($row['type'], $row['trans_no'], $company_pref["purchase_vat"]);
+		$vat += get_gl_trans_amount($row['type'], $row['trans_no'], '1410010');
+		$others = round($row['total'],2) - round($p_nv+$p_v+$vat,2);
+		
+		// if ( abs(abs($p_v*(0.12)) - abs($vat)) > 1 )
+		// {
+			$tr_date = $row['del_date'];
+			
+			if (!is_date($tr_date) OR $tr_date == '0000-00-00' OR $tr_date =='')
+				$tr_date = $row['tran_date'];
+				
+			
+			fix_purchase_gl($row['type'], $row['trans_no'], $row['supplier_id'], $row['tax_group_id'], $p_nv, $p_v, $vat, $tr_date);
+		// }
+	}
+	
+	// correct APV - GL DATE
+	$sql = "SELECT * FROM  0_supp_trans 
+			WHERE type = 20
+			AND del_date >= '2014-12-01'";
+	$res = db_query($sql);
+	
+	while($row = db_fetch($res))
+	{
+		fix_gl_date($row['trans_no'],$row['del_date']);
+	}
+	
+	
+	display_notification('SUCCESS');
+}
+
+function fix_gl_date($trans_no, $del_date)
+{
+	$sql = "UPDATE 0_gl_trans SET
+				tran_date = '$del_date'
+			WHERE type = 20
+			AND type_no=$trans_no";
+	db_query($sql,'failed to update gl');
+}
+
+function fix_purchase_gl($type, $trans_no, $supp_id,  $tax_id, $p_nv, $p_v, $vat, $del_date)
+{
+	// 5400 - p nonvat
+	// 5450 - p vat
+	// 1410010 - input vat
+	
+	// display_error("$type, $trans_no, $supp_id,  $tax_id, $p_nv, $p_v, $vat, $del_date");
+	
+	
+	// VATABLE = tax_group_id 1
+	if ($tax_id == 1)
+	{
+		// $gross = $p_v + $vat;
+		// $new_pvat = round($gross/1.12,2);
+		// $new_vat = round($gross - $new_pvat,2);
+		
+		$gross = $p_v + $vat + $p_nv;
+		$new_pvat = round($gross/1.12,2);
+		$new_vat= round($gross - $new_pvat,2);
+		
+		
+		if ($p_v == $new_pvat AND $vat == $new_vat AND $gross != 0)
+			return true;
+		
+		// display_error("$p_v  ~ $new_pvat");
+		// display_error("$vat ~ $new_vat");
+		// return false;
+			
+		begin_transaction();
+		if ($new_pvat != 0 AND $new_vat != 0) // VATABLE with purchase vat record
+		{
+			// $gross = $p_v + $vat + $p_nv;
+			// $new_pvat = round($gross/1.12,2);
+			// $new_vat= round($gross - $new_pvat,2);
+			
+			// update supp trans ov_amount and ov_gst
+			$sql = "UPDATE 0_supp_trans SET
+							ov_amount = $new_pvat,
+							ov_gst = $new_vat
+						WHERE type = $type
+						AND trans_no = $trans_no";
+			// display_error($sql);
+			db_query($sql, 'failed to update ov_amount and ov_gst');
+			
+			// delete INPUT VAT THEN REINSERT
+			$sql = "DELETE FROM 0_gl_trans 
+						WHERE account = '5450'
+						AND type = $type
+						AND type_no = $trans_no";
+			db_query($sql, 'failed to delete non vat');
+			
+			// if (mysql_affected_rows() == 0) // must insert if no VAT is found
+			// {
+				add_gl_trans($type, $trans_no, sql2date($del_date), '5450', 0, 0, '',$new_pvat, null, 3, $supp_id);
+
+			// }
+			
+			// // update gl_trans
+			// $sql = "UPDATE 0_gl_trans SET
+							// amount = $new_pvat
+						// WHERE account = '5450'
+						// AND type = $type
+						// AND type_no = $trans_no";
+			// // display_error($sql);
+			// db_query($sql, 'failed to update purch vat');
+			
+			// $sql = "UPDATE 0_gl_trans SET
+							// amount = $new_vat
+						// WHERE account = '1410010'
+						// AND type = $type
+						// AND type_no = $trans_no";
+			// // display_error($sql);
+			// db_query($sql, 'failed to update input vat');
+			
+			// delete INPUT VAT THEN REINSERT
+			$sql = "DELETE FROM 0_gl_trans 
+						WHERE account = '1410010'
+						AND type = $type
+						AND type_no = $trans_no";
+			db_query($sql, 'failed to delete non vat');
+			
+			// if (mysql_affected_rows() == 0) // must insert if no VAT is found
+			// {
+				add_gl_trans($type, $trans_no, sql2date($del_date), '1410010', 0, 0, '',$new_vat, null, 3, $supp_id);
+
+			// }
+			$sql = "DELETE FROM 0_gl_trans 
+						WHERE account = '5400'
+						AND type = $type
+						AND type_no = $trans_no";
+			db_query($sql, 'failed to delete non vat');
+		}
+		else if ($p_v == 0 AND $p_nv != 0 AND $vat == 0) // VATABLE but placed in NON VAT
+		{
+			$gross = $p_nv;
+			
+			$new_pvat = round($gross/1.12,2);
+			$new_vat = round($gross - $new_pvat,2);
+			
+			// update supp trans ov_amount and ov_gst
+			$sql = "UPDATE 0_supp_trans SET
+							ov_amount = $new_pvat,
+							ov_gst = $new_vat
+						WHERE type = $type
+						AND trans_no = $trans_no";
+			// display_error($sql);
+			db_query($sql, 'failed to update ov_amount and ov_gst');
+			
+			// update gl_trans purchase vat entry (pnv to pv)
+			$sql = "UPDATE 0_gl_trans SET
+							amount = $new_pvat,
+							account = '5450'
+						WHERE account = '5400'
+						AND type = $type
+						AND type_no = $trans_no";
+			// display_error($sql);
+			db_query($sql, 'failed to update purch vat');
+			
+			$sql = "UPDATE 0_gl_trans SET
+							amount = $new_vat
+						WHERE account = '1410010'
+						AND type = $type
+						AND type_no = $trans_no";
+			// display_error($sql);
+			db_query($sql, 'failed to update input vat');
+			
+			if (mysql_affected_rows() == 0) // must insert if no VAT is found
+			{
+				add_gl_trans($type, $trans_no, sql2date($del_date), '1410010', 0, 0, '',$new_vat, null, 3, $supp_id);
+
+			}
+		}
+		
+		commit_transaction();
+	}
+	
+	// NON VATABLE = tax_group_id 2
+	if ($tax_id == 2)
+	{
+		$gross = $p_v + $vat + $p_nv;
+		
+		if ($p_v == 0 AND $vat == 0 AND $p_nv != 0)
+			return true;
+		
+		
+		begin_transaction();
+		
+		if ($p_v != 0 AND $p_nv == 0 AND $vat == 0)
+		{
+			// TRANSFER FROM VAT TO NVAT
+			$sql = "UPDATE 0_gl_trans SET
+							account = '5400'
+						WHERE type = $type
+						AND type_no = $trans_no
+						AND account = '5450'";
+						
+			// display_error($sql);
+			db_query($sql, 'failed to transfer from vat to non vat');
+		}
+		
+		else //if ($p_v != 0 AND $p_nv == 0 AND $vat != 0)
+		{
+			// display_error("$p_nv  ~ $gross ELSE");
+			// return false;
+			
+			// DELETE PVAT AND VAT
+			$sql = "DELETE FROM 0_gl_trans 
+						WHERE type = $type
+						AND type_no = $trans_no
+						AND account IN ('5450','5400','1410010 ')";
+			// display_error($sql);
+			db_query($sql, 'failed to delete vat, nv and p vat');
+			
+			// INSERT NON VAT
+			add_gl_trans($type, $trans_no, sql2date($del_date), '5400', 0, 0, '',$gross, null, 3, $supp_id);
+			
+			// update supp trans ov_amount and ov_gst
+			$sql = "UPDATE 0_supp_trans SET
+							ov_amount = $gross,
+							ov_gst = 0
+						WHERE type = $type
+						AND trans_no = $trans_no";
+			// display_error($sql);
+			db_query($sql, 'failed to update ov_amount and ov_gst');
+		}
+		commit_transaction();
+	}
+	//==================================
+}
+start_form();
+
+if (!isset($_POST['from']))
+	$_POST['from'] = '01/01/2015';
+if (!isset($_POST['to']))
+	$_POST['to'] = '12/31/2015';
+
+start_table($table_style2);
+date_row('DATE from:', 'from');
+date_row('DATE to:', 'to');
+end_table(2);
+submit_center('fix_now', 'GO');
+end_form();
+
+end_page();
+?>

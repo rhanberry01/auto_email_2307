@@ -1,0 +1,444 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+$page_security = 'SA_GLANALYTIC';
+// ----------------------------------------------------------------
+// $ Revision:	2.0 $
+// Creator:	Joe Hunt
+// date_:	2005-05-19
+// Title:	Audit Trail
+// ----------------------------------------------------------------
+$path_to_root="..";
+
+include_once($path_to_root . "/includes/session.inc");
+include_once($path_to_root . "/includes/date_functions.inc");
+include_once($path_to_root . "/includes/data_checks.inc");
+include_once($path_to_root . "/gl/includes/gl_db.inc");
+include_once($path_to_root . "/includes/ui/ui_view.inc");
+
+//----------------------------------------------------------------------------------------------------
+
+print_report();
+//----------------------------------------------------------------------------------------------------
+function check_if_purch($trans_no)
+{
+	$sql = "SELECT count(type_no) as count FROM 0_gl_trans WHERe type = 20 AND type_no = $trans_no 
+	and account IN (5450,5400)";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	$count = $row['count'];
+	return $count;
+	
+}
+
+function print_report()
+{
+    global $path_to_root, $systypes_array;
+
+    $from = $_POST['PARAM_0'];
+    $to = $_POST['PARAM_1'];
+    $t_nt = $_POST['PARAM_2']; //trade 1  nontrade 0 all 2
+	$rba = $_POST['PARAM_3']; // 1-retail 0-belen 2-all
+	
+	include_once($path_to_root . "/reporting/includes/excel_report.inc");
+
+    $dec = user_price_dec();
+
+	//==================================================== header
+		$ap_account = get_company_pref('creditors_act'); //2000
+		$h = 'For AP Trade/Non-Trade';
+
+    $params =   array( 	0 => '',
+    				    1 => array('text' => _('Period'), 'from' => $from,'to' => $to),
+                    	2 => array('text' => _('Type'), 'from' => $h, 'to' => '')
+						);
+
+    $rep = new FrontReport(_('Accounts Payable Book'), "AccountsPayableBook", "LETTER");
+
+    $rep->Font();
+	
+	$rep->sheet->setColumn(0,0,15);
+	$rep->sheet->setColumn(0,2,25);
+	$rep->sheet->setColumn(0,2,25);
+	$rep->sheet->setColumn(3,3,10);
+	$rep->sheet->setColumn(4,4,13);
+	$rep->sheet->setColumn(5,6,10);
+	$rep->sheet->setColumn(7,7,12);
+	$rep->sheet->setColumn(8,9,13);
+	$rep->sheet->setColumn(9,9,13);
+	$rep->sheet->setColumn(10,count($c_header),18);
+	
+	$com = get_company_prefs();
+	
+	$format_bold_title =& $rep->addFormat();
+	$format_bold_title->setTextWrap();
+	$format_bold_title->setBold();
+	$format_bold_title->setAlign('center');
+	
+	$format_bold =& $rep->addFormat();
+	$format_bold->setBold();
+	$format_bold->setAlign('left');
+	
+	$format_bold_right =& $rep->addFormat();
+	$format_bold_right->setBold();
+	$format_bold_right->setAlign('right');
+
+	$format_bold_center =& $rep->addFormat();
+	$format_bold_center->setBold();
+	$format_bold_center->setAlign('center');
+	
+	$rep->sheet->writeString($rep->y, 0, $com['coy_name'], $format_bold);
+	$rep->y ++;
+	$rep->sheet->writeString($rep->y, 0, 'ACCOUNTS PAYABLE BOOK', $format_bold);
+	$rep->y ++;
+
+
+	$rep->sheet->writeString($rep->y, 0, $to, $format_bold);
+	$rep->y ++;
+
+	// $rep->sheet->setMerge(0,0,0,3);
+	// $rep->sheet->setMerge(1,0,1,3);
+	// $rep->sheet->setMerge(2,0,2,3);
+	// $rep->sheet->setMerge(4,0,4,3);
+	// $rep->sheet->setMerge(7,0,7,3);
+//===================================================================================
+
+	// get the header
+	$c_header = array('DATE','SUPPLIER');
+	array_push($c_header, 'TRANS NO.','PARTICULARS');
+	
+	$c_header_last_index = count($c_header)-1;
+		if ($t_nt==1) {
+	array_push($c_header,'2000','1410011',
+'1410012',
+'1540010',
+'6290010',
+'6010011',
+'622010',
+'622010',
+'6230',
+'6310',
+'1440',
+'1410010'
+);
+	}
+	else if ($t_nt==0){
+		array_push($c_header,'2000010','1410011',
+'1410012',
+'1540010',
+'6290010',
+'6010011',
+'622010',
+'622010',
+'6230',
+'6310',
+'1440',
+'1410010'
+);
+	}
+	else {
+		array_push($c_header,'2000','2000010','1410011',
+'1410012',
+'1540010',
+'6290010',
+'6010011',
+'622010',
+'622010',
+'6230',
+'6310',
+'1440',
+'1410010'
+);
+	}	
+
+	
+
+
+	$c_details = array();
+	$c_totals = array();
+	$gl_details = array();
+	
+	
+	$sql = "SELECT st.tran_date, st.supplier_id, st.reference, st.supp_reference, 
+	gl.type,gl.type_no FROM 0_gl_trans as gl
+	LEFT JOIN 0_supp_trans as st
+	ON gl.type_no=st.trans_no
+	WHERE ";
+	if ($t_nt==1) {
+	$sql .= " gl.account IN (2000)";
+	}
+	else if ($t_nt==0){
+		$sql .= " gl.account IN (2000010)";
+	}
+	else {
+		$sql .= " gl.account IN (2000,2000010)";
+	}	
+				
+	$sql .=" AND gl.tran_date >= '".date2sql($from)."'
+				AND gl.tran_date <= '".date2sql($to)."'
+				AND gl.amount < 0
+				AND gl.type = 20
+				AND st.type =20
+				ORDER BY gl.type_no";
+	$res = db_query($sql);
+	//display_error($sql); die;
+	
+	if (db_num_rows($res) == 0)
+		return false;
+
+	$checker = $count = 0;
+	$last_bank_id = $last_check = 0;
+	set_time_limit(0);
+	
+	$c_header2=$c_header;
+	//================To count total header, then add the sundries part
+	// while($row2 = db_fetch($res2))
+	// {
+		// $gl_2[$row2['bd_det_gl_code']] = $row2['bd_oi'];
+		// if (in_array($row2['bd_det_gl_code'], $c_header2)){
+		
+						// foreach($gl_2 as $ind2 => $amt2)
+						// {
+								// $indx2 = array_search($ind2, $c_header2);
+								// if ($indx2 == false)
+								// {
+									// $c_header2[] = $ind2;
+								// }
+								
+						// }
+		// }
+	// }
+	$header_total_count=count($c_header2)-1;
+	//print_r(count($c_header)-1);
+	//==================End of counting header
+	
+	while($row = db_fetch($res))
+	{
+		
+		$count_purch=check_if_purch($row["type_no"]);
+		if($count_purch==0) 
+		{
+			$count ++;
+
+			$date_to_ = explode_date_to_dmy($to);
+			
+			
+			//$c_details[$count][0] = $del_dates;
+			$c_details[$count][0] = sql2date($row['tran_date']);
+			$c_details[$count][1] = html_entity_decode(get_supplier_name($row['supplier_id']));
+			$last_index = 1;
+
+			$c_details[$count][$last_index+1] = $row['reference'];
+			$c_details[$count][$last_index+2] = get_comments_string($row["type"],$row["type_no"]);
+			//$c_details[$count][$last_index+3] = $row['reference'];
+
+			// $c_totals[$last_index+5] += $chk_amount;			
+			// $c_totals[$last_index+6] += $pdc;		
+						//print_r($gl_);
+						//print_r($c_header);
+					//	print_r(in_array($row['bd_det_gl_code'], $c_header));
+					
+					
+						
+						
+						
+							
+									$sql2 = "SELECT *
+									FROM 0_gl_trans WHERe type = 20
+									AND type_no = ".$row['type_no']."
+									";									
+									
+									// $sql2 = "SELECT *
+									// FROM 0_gl_trans WHERE type = 20
+									// AND type_no = 19511
+									// ";
+									//display_error($sql2);
+									$res2 = db_query($sql2);
+							
+									
+									while($row2 = db_fetch($res2))
+									{
+								
+													//$gl_2[] = array("amount"=>$row2['amount'],"account"=>$row2['account']);
+													$gl_[$row2['account']] =  array("amount"=>$row2['amount'],"account"=>$row2['account']);
+													
+													if (in_array($row2['account'], $c_header)){
+															foreach($gl_ as $ind => $amt)
+															{
+																	$indx = array_search($ind, $c_header);
+																	if ($indx == false)
+																	{
+																		//$c_header[] = $ind;
+
+																		end($c_header);         // move the internal pointer to the end of the array
+																		$indx = key($c_header); // fetches the key of the element pointed to by the internal pointer
+																	}								
+																	$c_details[$count][$indx] += $amt['amount'];
+																	$c_totals[$indx] += $amt['amount'];	
+															}
+													}
+													else{
+
+															foreach($gl_ as $ind => $amt)
+															{
+																	$indx = array_search($ind, $c_header2);
+																	if ($indx == false)
+																	{
+																		$c_header2[] = $ind;
+
+																		end($c_header2);         // move the internal pointer to the end of the array
+																		$indx = key($c_header2); // fetches the key of the element pointed to by the internal pointer
+																	}					
+
+																	$c_details1[$amt['account']] =  array("amount"=>$amt['amount'],"account"=>$amt['account']);																	
+	
+																	//$c_totals1[$indx1] += $amt['amount'];	
+															}
+													}
+														
+																	// if (!in_array($row2['account'], $c_header)){
+																		// $c_details[$count][$header_total_count+1] = get_gl_account_name($row2['account']);//formerly 9
+																		// $c_details[$count][$header_total_count+2] = '';//formerly 9
+																		// $c_details[$count][$header_total_count+3] = $row2['amount'];//formerly 9es the key of the element pointed to by the internal pointer
+																	// }
+																	
+																	// if (!in_array($row2['account'], $c_header)){
+																		// $c_details1[$count][$header_total_count+1] = get_gl_account_name($row2['account']);//formerly 9
+																		// $c_details1[$count][$header_total_count+2] = '';//formerly 9
+																		// $c_details1[$count][$header_total_count+3] = $row2['amount'];//formerly 9es the key of the element pointed to by the internal pointer
+																	// }
+																	
+																	//$c_details[$count][]=$c_details1[$count][$header_total_count+3] = $row2['amount'];
+														
+													$gl_[$row2['account']]='';
+													$last_check = $row['trans_no'];
+									}
+					
+		}
+
+		
+		// $c_details[$count][$indx] = 4;//formerly 9
+		// $c_details[$count][$indx] = 5;//formerly 9
+
+		// $c_totals[7] += $payables;			
+		// $c_totals[8] += $purchases;		
+	}
+		//var_dump($c_totals1);die;
+			//var_dump($gl_);
+
+	//====================================================HEADER-============================
+	foreach ($c_header as $ind => $title){
+		$rep->sheet->writeString($rep->y, $ind, ($ind <= $c_header_last_index ? $title : html_entity_decode(get_gl_account_name($title))), $format_bold_title);
+	}
+		$c_header_last_index = count($c_header)-1;
+	array_push($c_header, 'SUNDRIES', 'CR', 'DR');
+	
+	foreach ($c_header as $ind => $title){
+		$rep->sheet->writeString($rep->y, $ind, $title , $format_bold_title);
+	}
+	
+	//var_dump($c_details); die;
+	// var_dump($c_details1);
+	// var_dump($c_details2);
+
+	// die;
+	foreach($c_details as $i => $details)
+	{
+		$rep->y ++;
+		foreach($details as $index => $det)
+		{		
+				if(is_numeric($det)){
+					if($det==0){
+						$rep->sheet->writeString($rep->y, $index, '', $rep->formatLeft);
+					}
+					else{
+						$rep->sheet->writeNumber($rep->y, $index, $det, $rep->formatLeft);
+					}
+				
+					
+				}
+				else{
+					$rep->sheet->writeString($rep->y, $index, $det, $rep->formatLeft);
+				}
+				
+			//	var_dump($details); die;
+		}
+		
+		
+
+		foreach($c_details1 as $i => $details)
+		{
+					if(is_numeric($details)){
+						if($details==0){
+							$rep->sheet->writeString($rep->y, $c_header_last_index+1, '', $rep->formatLeft);
+							$rep->y ++;
+						}
+						else{
+							$rep->sheet->writeNumber($rep->y, $c_header_last_index+1, $details['account'], $rep->formatLeft);
+							$rep->sheet->writeNumber($rep->y, $c_header_last_index+2, $details['amount'], $rep->formatLeft);
+							$rep->y ++;
+						}
+					
+						
+					}
+					else{
+						$rep->sheet->writeString($rep->y, $c_header_last_index+1, $details['account'], $rep->formatLeft);
+						$rep->sheet->writeString($rep->y, $c_header_last_index+2, $details['amount'], $rep->formatLeft);
+						$rep->y ++;
+					}
+					
+
+		}
+		
+	}
+	
+	
+	// var_dump($c_details1); 
+	// foreach($c_details1 as $i => $details)
+	// {
+				// if(is_numeric($det)){
+					// if($det==0){
+						// $rep->sheet->writeString($rep->y, $c_header_last_index+1, '', $rep->formatLeft);
+						// $rep->y ++;
+					// }
+					// else{
+						// $rep->sheet->writeNumber($rep->y, $c_header_last_index+1, $details['account'], $rep->formatLeft);
+						// $rep->sheet->writeNumber($rep->y, $c_header_last_index+2, $details['amount'], $rep->formatLeft);
+						// $rep->y ++;
+					// }
+				
+					
+				// }
+				// else{
+					// $rep->sheet->writeString($rep->y, $c_header_last_index+1, $details['account'], $rep->formatLeft);
+					// $rep->sheet->writeString($rep->y, $c_header_last_index+2, $details['amount'], $rep->formatLeft);
+					// $rep->y ++;
+				// }
+				
+
+	// }
+
+	
+
+	$rep->y ++;
+	$rep->sheet->writeString($rep->y, 0, 'TOTAL', $rep->formatLeft);
+	$qwert = $rep->y;
+	foreach ($c_totals as $ind => $total)
+	{
+		$rep->sheet->writeNumber ($rep->y, $ind, $total, $format_bold_right);
+		
+	}
+
+	$rep->y++;
+    $rep->End();
+}
+
+?>

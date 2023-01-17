@@ -1,0 +1,444 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+function get_supplier_details($supplier_id, $to=null)
+{
+
+	if ($to == null)
+		$todate = date("Y-m-d");
+	else
+		$todate = date2sql($to);
+	$past1 = get_company_pref('past_due_days');
+	$past2 = 2 * $past1;
+	$past3 = 3 * $past1;
+	$past4 = 4 * $past1;
+	$past5 = 5 * $past1;
+	// removed - supp_trans.alloc from all summations
+
+    $value = "(".TB_PREF."supp_trans.ov_amount + ".TB_PREF."supp_trans.ov_gst + ".TB_PREF."supp_trans.ov_discount)";
+	$due = "IF (".TB_PREF."supp_trans.type=".ST_SUPPINVOICE." OR ".TB_PREF."supp_trans.type=".ST_SUPPCREDIT.",".TB_PREF."supp_trans.tran_date+1,IF(".TB_PREF."supp_trans.type = ".ST_SUPPAYMENT.", ".TB_PREF."supp_trans.tran_date+1,".TB_PREF."supp_trans.tran_date+1))";
+    $sql = "SELECT ".TB_PREF."suppliers.supp_name, ".TB_PREF."suppliers.curr_code, ".TB_PREF."payment_terms.terms,
+
+		Sum($value) AS Balance,
+
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= 0,$value,0)) AS Due,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past1,$value,0)) AS Overdue1,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past2,$value,0)) AS Overdue2,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past3,$value,0)) AS Overdue3,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past4,$value,0)) AS Overdue4,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past5,$value,0)) AS Overdue5
+
+		FROM ".TB_PREF."suppliers,
+			 ".TB_PREF."payment_terms,
+			 ".TB_PREF."supp_trans
+
+		WHERE
+			 ".TB_PREF."suppliers.payment_terms = ".TB_PREF."payment_terms.terms_indicator
+			 AND ".TB_PREF."suppliers.supplier_id = $supplier_id
+			 AND ".TB_PREF."supp_trans.tran_date <= '$todate' AND alloc<$value AND ".TB_PREF."supp_trans.type=".ST_SUPPINVOICE."
+			 AND ".TB_PREF."suppliers.supplier_id = ".TB_PREF."supp_trans.supplier_id
+
+		GROUP BY
+			  ".TB_PREF."suppliers.supp_name,
+			  ".TB_PREF."payment_terms.terms,
+			  ".TB_PREF."payment_terms.days_before_due,
+			  ".TB_PREF."payment_terms.day_in_following_month";
+
+    $result = db_query($sql,"The customer details could not be retrieved");
+
+    if (db_num_rows($result) == 0)
+    {
+
+    	/*Because there is no balance - so just retrieve the header information about the customer - the choice is do one query to get the balance and transactions for those customers who have a balance and two queries for those who don't have a balance OR always do two queries - I opted for the former */
+
+    	$nil_balance = true;
+
+    	$sql = "SELECT ".TB_PREF."suppliers.supp_name, ".TB_PREF."suppliers.curr_code, ".TB_PREF."suppliers.supplier_id,  ".TB_PREF."payment_terms.terms
+			FROM ".TB_PREF."suppliers,
+				 ".TB_PREF."payment_terms
+			WHERE
+				 ".TB_PREF."suppliers.payment_terms = ".TB_PREF."payment_terms.terms_indicator
+				 AND ".TB_PREF."suppliers.supplier_id = ".db_escape($supplier_id);
+
+    	$result = db_query($sql,"The customer details could not be retrieved");
+
+    }
+    else
+    {
+    	$nil_balance = false;
+    }
+
+    $supp = db_fetch($result);
+
+    if ($nil_balance == true)
+    {
+    	$supp["Balance"] = 0;
+    	$supp["Due"] = 0;
+    	$supp["Overdue1"] = 0;
+    	$supp["Overdue2"] = 0;
+    }
+
+    return $supp;
+
+}
+function get_supplier_details2($supplier_id, $to=null)
+{
+
+	if ($to == null)
+		$todate = date("Y-m-d");
+	else
+		$todate = date2sql($to);
+	$past1 = get_company_pref('past_due_days');
+	$past2 = 2 * $past1;
+	$past3 = 3 * $past1;
+	$past4 = 4 * $past1;
+	$past5 = 5 * $past1;
+	// removed - supp_trans.alloc from all summations
+
+    $value = "(".TB_PREF."supp_trans.ov_amount + ".TB_PREF."supp_trans.ov_gst + ".TB_PREF."supp_trans.ov_discount)";
+	$due = TB_PREF."supp_trans.due_date+1";
+    $sql = "SELECT ".TB_PREF."suppliers.supp_name, ".TB_PREF."suppliers.curr_code, ".TB_PREF."payment_terms.terms,
+
+		Sum($value) AS Balance,
+
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= 0,$value,0)) AS Due,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past1,$value,0)) AS Overdue1,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past2,$value,0)) AS Overdue2,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past3,$value,0)) AS Overdue3,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past4,$value,0)) AS Overdue4,
+		Sum(IF ((TO_DAYS('$todate') - TO_DAYS($due)) >= $past5,$value,0)) AS Overdue5
+
+		FROM ".TB_PREF."suppliers,
+			 ".TB_PREF."payment_terms,
+			 ".TB_PREF."supp_trans
+
+		WHERE
+			 ".TB_PREF."suppliers.payment_terms = ".TB_PREF."payment_terms.terms_indicator
+			 AND ".TB_PREF."suppliers.supplier_id = $supplier_id AND alloc<$value
+			 AND ".TB_PREF."supp_trans.due_date <= '$todate' AND ".TB_PREF."supp_trans.type NOT IN(".ST_SUPPAYMENT.",".ST_SUPPCREDITMEMO.",".ST_SUPPDEBITMEMO.")
+			 AND ".TB_PREF."suppliers.supplier_id = ".TB_PREF."supp_trans.supplier_id
+
+		GROUP BY
+			  ".TB_PREF."suppliers.supp_name,
+			  ".TB_PREF."payment_terms.terms,
+			  ".TB_PREF."payment_terms.days_before_due,
+			  ".TB_PREF."payment_terms.day_in_following_month";
+
+    $result = db_query($sql,"The customer details could not be retrieved");
+
+    if (db_num_rows($result) == 0)
+    {
+
+    	/*Because there is no balance - so just retrieve the header information about the customer - the choice is do one query to get the balance and transactions for those customers who have a balance and two queries for those who don't have a balance OR always do two queries - I opted for the former */
+
+    	$nil_balance = true;
+
+    	$sql = "SELECT ".TB_PREF."suppliers.supp_name, ".TB_PREF."suppliers.curr_code, ".TB_PREF."suppliers.supplier_id,  ".TB_PREF."payment_terms.terms
+			FROM ".TB_PREF."suppliers,
+				 ".TB_PREF."payment_terms
+			WHERE
+				 ".TB_PREF."suppliers.payment_terms = ".TB_PREF."payment_terms.terms_indicator
+				 AND ".TB_PREF."suppliers.supplier_id = ".db_escape($supplier_id);
+
+    	$result = db_query($sql,"The customer details could not be retrieved");
+
+    }
+    else
+    {
+    	$nil_balance = false;
+    }
+
+    $supp = db_fetch($result);
+
+    if ($nil_balance == true)
+    {
+    	$supp["Balance"] = 0;
+    	$supp["Due"] = 0;
+    	$supp["Overdue1"] = 0;
+    	$supp["Overdue2"] = 0;
+    }
+
+    return $supp;
+
+}
+
+function get_supplier($supplier_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."suppliers WHERE supplier_id=".db_escape($supplier_id);
+
+	$result = db_query($sql, "could not get supplier");
+
+	return db_fetch($result);
+}
+
+function get_supplier_name($supplier_id)
+{
+	$sql = "SELECT supp_name AS name FROM ".TB_PREF."suppliers WHERE supplier_id=".db_escape($supplier_id);
+
+	$result = db_query($sql, "could not get supplier");
+
+	$row = db_fetch_row($result);
+
+	return html_entity_decode($row[0]);
+}
+
+function get_supplier_note($supplier_id)
+{
+	$sql = "SELECT notes FROM ".TB_PREF."suppliers WHERE supplier_id=".db_escape($supplier_id);
+
+	$result = db_query($sql, "could not get supplier note");
+
+	$row = db_fetch_row($result);
+
+	return html_entity_decode($row[0]);
+}
+
+function get_supplier_accounts($supplier_id)
+{
+	$sql = "SELECT payable_account,purchase_account,payment_discount_account FROM ".TB_PREF."suppliers WHERE supplier_id=".db_escape($supplier_id);
+
+	$result = db_query($sql, "could not get supplier");
+
+	return db_fetch($result);
+}
+
+function get_supplier_id_by_supp_ref($supp_ref)
+{
+	$sql = "SELECT supplier_id FROM ".TB_PREF."suppliers
+				WHERE supp_ref = ".db_escape($supp_ref);
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	return $row[0];
+}
+
+function get_supplier_id_by_po_id($po_id)
+{
+	$sql = "SELECT supplier_id FROM ".TB_PREF."purch_orders 
+				WHERE order_no = $po_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return $row[0];
+}
+
+function get_supplier_id_by_po_no($reference)
+{
+	$sql = "SELECT supplier_id FROM ".TB_PREF."purch_orders 
+				WHERE reference = '$reference'";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return $row[0];
+}
+
+function get_supplier_pay_to($supp_id)
+{
+	$sql = "SELECT supp_name, pay_to FROM ".TB_PREF."suppliers
+			WHERE supplier_id = $supp_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	if ($row['pay_to'] != '')
+		return $row['pay_to'];
+	else
+		return preg_replace("/\([^)]+\)/","",$row['supp_name']);
+}
+
+function get_supplier_ref($supp_id)
+{
+	$sql = "SELECT supp_ref FROM ".TB_PREF."suppliers
+			WHERE supplier_id = $supp_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+
+	return $row[0];
+}
+
+function get_supplier_tin($supp_id)
+{
+	$sql = "SELECT gst_no FROM ".TB_PREF."suppliers
+			WHERE supplier_id = $supp_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+
+	return $row[0];
+}
+
+function apply_ewt_to_supplier($supp_id)
+{
+	$sql = "SELECT with_ewt FROM ".TB_PREF."suppliers
+			WHERE supplier_id = $supp_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+
+	return $row[0];
+}
+
+function check_terms($term_id)
+{
+	// $s_sql = "SELECT * FROM Terms WHERE TermID = $term_id";
+	// $s_res = ms_db_query($s_sql);
+	// $row = mssql_fetch_array($s_res);
+	
+	// $sql = "SELECT * FROM ".TB_PREF."payment_terms WHERE terms = ".db_escape($row['Description']);
+	// $res = db_query($sql);
+	
+	// if (db_num_rows($res) == 0)
+	// {
+		// $sql = "INSERT INTO ".TB_PREF."payment_terms (terms,
+					// days_before_due, day_in_following_month)
+					// VALUES (" .db_escape($row['Description']) . ", " . db_escape($row['Terms']+0) . ", 0)";
+		// db_query($sql, 'failed to insert new payment term');
+		
+		// return db_insert_id();
+	// }
+	// else
+	// {
+		// $row = db_fetch($res);
+		// return $row['terms_indicator'];
+	// }
+	return 1;
+}
+
+
+function check_my_suppliers($supp_ref)
+{
+	$sql = "SELECT * FROM ".TB_PREF."suppliers WHERE supp_ref =".db_escape($supp_ref);
+	$res = db_query($sql);
+	
+	
+	$v_sql = "SELECT 	vendorcode,description,address,city,zipcode,country,fax,email,phone,contactperson,termid,daystodeliver,tradediscount,cashdiscount,
+			terms,IncludeLineDiscounts,discountcode1,discountcode2,discountcode3,discount1,discount2,discount3,daystosum,reordermultiplier,remarks,
+			SHAREWITHBRANCH,Consignor,LASTDATEMODIFIED,TIN FROM vendor 
+			WHERE vendorcode = '".ms_escape_string($supp_ref)."'";
+	$v_res = ms_db_query($v_sql);
+	$v_row = mssql_fetch_array($v_res);
+	
+	if (trim($v_row['vendorcode']) == '')
+	{
+		display_error("VENDOR CODE NOT IN MSSQL : $supp_ref");
+		return false;
+	}
+		
+		
+	if (db_num_rows($res) > 0)
+	{
+		$row = db_fetch($res);
+		
+		$update_sql = "UPDATE ".TB_PREF."suppliers SET
+				supp_name = ".db_escape($v_row['description']).", 
+				supp_ref = ".db_escape($v_row['vendorcode']).", 
+				address = ".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')) .", 
+				supp_address = ".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')).", 
+				phone = ".db_escape($v_row['phone']).", 
+				fax = ".db_escape($v_row['fax']).", 
+				contact = ".db_escape($v_row['contactperson'])."
+			WHERE supp_ref =".db_escape($supp_ref);
+		db_query($update_sql, 'failed to update supplier');
+		return $row['supplier_id'];
+	}
+	else
+	{
+		$ins_sql = "INSERT INTO ".TB_PREF."suppliers (supp_name ,supp_ref ,address ,supp_address ,phone ,fax ,gst_no ,contact ,email ,payment_terms ,notes)
+			VALUES(".db_escape($v_row['description']).", 
+				".db_escape($v_row['vendorcode']).", 
+				".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')) .", 
+				".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')).", 
+				".db_escape($v_row['phone']).", 
+				".db_escape($v_row['fax']).", 
+				".db_escape($v_row['TIN']).",  
+				".db_escape($v_row['contactperson']).",  
+				".db_escape($v_row['email']).",  1, 
+				".db_escape($v_row['remarks']).")";
+		db_query($ins_sql, 'failed to insert supplier');
+		
+		return db_insert_id();
+	}
+}
+
+function supplier_got_email($supp_id)
+{
+	$sql = "SELECT email FROM ".TB_PREF."suppliers 
+			WHERE supplier_id = $supp_id
+			AND email != ''";
+	$res = db_query($sql);
+	return db_num_rows($res) != 0;
+}
+
+function update_supplier_pay_to($supplier_id, $pay_to)
+{
+	$sql = "UPDATE ".TB_PREF."suppliers SET
+				pay_to = ".db_escape($pay_to)."
+			WHERE supplier_id = $supplier_id";
+	db_query($sql,'failed to update supplier pay_to');
+}
+
+function supplier_has_billing_institution_code($supplier_id)
+{
+	$sql = "SELECT billing_institution_code FROM ".TB_PREF."suppliers
+			WHERE supplier_id = $supplier_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return ($row[0] != '');
+}
+
+function check_my_suppliers_email($supp_ref)
+{
+	$sql = "SELECT * FROM ".TB_PREF."suppliers WHERE supp_ref =".db_escape($supp_ref);
+	$res = db_query($sql);
+	
+	
+	$v_sql = "SELECT vendorcode,description,address,city,zipcode,country,fax,email,phone,contactperson,termid,daystodeliver,tradediscount,cashdiscount,
+			terms,IncludeLineDiscounts,discountcode1,discountcode2,discountcode3,discount1,discount2,discount3,daystosum,reordermultiplier,remarks,
+			SHAREWITHBRANCH,Consignor,LASTDATEMODIFIED,TIN FROM vendor 
+			WHERE vendorcode = '".ms_escape_string($supp_ref)."'";
+	$v_res = ms_db_query($v_sql);
+	$v_row = mssql_fetch_array($v_res);
+	
+	if ($v_row['vendorcode'] == '')
+	{
+		return false;
+	}
+		
+		
+	if (db_num_rows($res) > 0)
+	{
+		$row = db_fetch($res);
+		
+		$update_sql = "UPDATE ".TB_PREF."suppliers SET
+				consignment_email = ".db_escape($v_row['email'])."
+			WHERE supp_ref =".db_escape($supp_ref);
+		db_query($update_sql, 'failed to update supplier email');
+		return $row['supplier_id'];
+	}
+	else
+	{
+		$ins_sql = "INSERT INTO ".TB_PREF."suppliers (supp_name ,supp_ref ,address ,supp_address ,phone ,fax ,gst_no ,contact ,email ,payment_terms ,notes,consignment_email)
+			VALUES(".db_escape($v_row['description']).", 
+				".db_escape($v_row['vendorcode']).", 
+				".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')) .", 
+				".db_escape($v_row['address'] . (trim($v_row['city']) != '' ? ', '.$v_row['city']:'')).", 
+				".db_escape($v_row['phone']).", 
+				".db_escape($v_row['fax']).", 
+				".db_escape($v_row['TIN']).",  
+				".db_escape($v_row['contactperson']).",  
+				".db_escape($v_row['email']).",  
+				".check_terms($v_row['termid']).", 
+				".db_escape($v_row['remarks']).",
+				".db_escape($v_row['email'])."
+				)";
+		db_query($ins_sql, 'failed to insert supplier');
+		
+		return db_insert_id();
+	}
+}
+?>

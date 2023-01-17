@@ -1,0 +1,656 @@
+<?php
+
+function getSA2BOCounter()
+{
+	$sql_re = "SELECT Counter
+				  FROM Counters
+				  WHERE TransactionTypeCode = 'SA2BO'";
+	$res = ms_db_query($sql_re);
+	$trancode =  mssql_fetch_array($res);
+	$tran_no = $trancode['Counter'] + 1;
+	
+	$sql = "UPDATE [Counters] SET 
+				Counter = $tran_no
+			WHERE TransactionTypeCode = 'SA2BO'";
+	ms_db_query($sql);
+	
+	return $tran_no;
+}
+
+function getR2SSACounter()
+{
+	$sql_re = "SELECT Counter
+				  FROM Counters
+				  WHERE TransactionTypeCode = 'R2SSA'";
+	$res = ms_db_query($sql_re);
+	$trancode =  mssql_fetch_array($res);
+	$tran_no = $trancode['Counter'] + 1;
+	
+	$sql = "UPDATE [Counters] SET 
+				Counter = $tran_no
+			WHERE TransactionTypeCode = 'R2SSA'";
+	ms_db_query($sql);
+	
+	return $tran_no;
+}
+function getFDFBCounter()
+{
+	$sql_re = "SELECT Counter
+				  FROM Counters
+				  WHERE TransactionTypeCode = 'FDFB'";
+	$res = ms_db_query($sql_re);
+	$trancode =  mssql_fetch_array($res);
+	$tran_no = $trancode['Counter'] + 1;
+	
+	$sql = "UPDATE [Counters] SET 
+				Counter = $tran_no
+			WHERE TransactionTypeCode = 'FDFB'";
+	ms_db_query($sql);
+	
+	return $tran_no;
+}
+
+function insert_rs($last_supp_code)
+{
+	$rs_id = getSA2BOCounter();
+	$sql = "INSERT INTO ".TB_PREF."rms_header (rs_id,rs_date, supplier_code, rs_action, created_by)
+			VALUES($rs_id, '".date2sql(Today())."','".$last_supp_code."',".supp_last_rs_action($last_supp_code).",".
+				$_SESSION['wa_current_user']->user.")";
+	db_query_rs($sql,'failed to insert rms header');
+	
+	$sql = "UPDATE ".TB_PREF."rms_items 
+			SET rs_id = $rs_id
+			WHERE rs_id = 0
+			AND supplier_code = '".$last_supp_code."'";
+	db_query_rs($sql,'failed to assign id 1');
+	
+	ms_movement($rs_id,'SA2BO');
+	
+	return $rs_id;
+}
+
+function get_product_row($prod_id)
+{
+	$sql = "SELECT * FROM Products WHERE ProductID = $prod_id";
+	$res = ms_db_query($sql);
+	$prod =  mssql_fetch_array($res);
+	
+	return $prod;
+}
+
+function get_pos_product_row($barcode)
+{
+	$sql = "SELECT * FROM POS_Products WHERE Barcode = '".$barcode."'";
+	$res = ms_db_query($sql);
+	$prod =  mssql_fetch_array($res);
+	
+	return $prod;
+}
+
+function get_rs_vendor_code($rs_id)
+{
+	$sql = "SELECT supplier_code FROM ".TB_PREF."rms_header	
+			WHERE rs_id = $rs_id";
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	
+	return $row[0];
+}
+
+function get_vendor_details($vendor_code)
+{
+	$sql = "SELECT description,address,contactperson FROM vendor WHERE vendorcode = '$vendor_code'";
+	$res = ms_db_query($sql);
+	$row = mssql_fetch_array($res);
+	return $row;
+}
+
+function ms_movement($rs_id, $MovementCode)
+{
+	$sql = "SELECT SUM(qty) FROM ".TB_PREF."rms_items 
+			WHERE rs_id = $rs_id";
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	$total_qty = $row[0];
+	
+	$sql = "SELECT SUM(ROUND(qty*price,3)) FROM ".TB_PREF."rms_items 
+			WHERE rs_id = $rs_id";
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	$net_total = $row[0];
+	
+	$vendor_code = $ToDescription = $ToAddress = $ContactPerson = '';
+	
+	if ($MovementCode == 'SA2BO')
+	{
+		$movement_no = str_pad($rs_id, 10, "0", STR_PAD_LEFT);
+		$area = 'SELLING AREA';
+		$flow_stockroom = 0;
+		$flow_sa = 1;
+		$flow_dmg = 2;
+
+		$prod_history_desc = 'SA to BO';
+	}
+	else if($MovementCode == 'R2SSA')
+	{	
+		$movement_no = str_pad(getR2SSACounter(), 10, "0", STR_PAD_LEFT);
+		$area = 'BO ROOM';
+		$vendor_code = get_rs_vendor_code($rs_id);
+		$vendor_row = get_vendor_details($vendor_code);
+		$ToDescription = $vendor_row['description'];
+		$ToAddress = $vendor_row['address'];
+		$ContactPerson = $vendor_row['contactperson'];
+		
+		$prod_history_desc = 'RETURN TO SUPPLIER';
+		$flow_stockroom = 0;
+		$flow_sa = 0;
+		$flow_dmg = 1;
+		$beg_sa = $dmg_in = $sa_out = 'NULL';
+	}
+	else if($MovementCode == 'FDFB')
+	{	
+		$movement_no = str_pad(getFDFBCounter(), 10, "0", STR_PAD_LEFT);
+		$area = 'BO ROOM';
+		
+		$prod_history_desc = 'For Disposal From BO';
+		$flow_stockroom = 0;
+		$flow_sa = 0;
+		$flow_dmg = 1;
+		$beg_sa = $dmg_in = $sa_out = 'NULL';
+	}
+	
+	global $db_connections;
+	$sql = "INSERT INTO Movements (MovementNo,
+				MovementCode,ReferenceNo,SourceInvoiceNo,SourceDRNo,ToDescription,ToAddress,ContactPerson,FromDescription,
+				FromAddress,DateCreated,LastModifiedBy,LastDateModified,Status,PostedBy,PostedDate,Terms,TransactionDate,
+				FieldStyleCode1,NetTotal,StatusDescription,TotalQty,CreatedBy,Remarks,CustomerCode,VendorCode,BranchCode,
+				CashDiscount,FieldStyleCode,ToBranchCode,FrBranchCode,sourcemovementno,countered,Transmitted,WithPayable,
+				WithReceivable,OtherExpenses,ForexRate,ForexCurrency,SalesmanID,RECEIVEDBY)
+			VALUES ('$movement_no','$MovementCode','','','','$ToDescription','$ToAddress','$ContactPerson',
+				'SAN ROQUE SUPERMARKET   ".strtoupper($db_connections[$_SESSION["wa_current_user"]->company]
+				["srs_branch"])." ($area)','','".Today()." 00:00:00',".
+				$_SESSION['wa_current_user']->user.",'".Today()." 00:00:00',2,".
+				$_SESSION['wa_current_user']->user.",'".Today()." 00:00:00',0,'".Today()." 00:00:00','',
+				$net_total,'POSTED',$total_qty,".$_SESSION['wa_current_user']->user.",'','','$vendor_code','','','','',
+				'','',0,0,0,0,0,1,'PHP',0,'')";
+	ms_db_query($sql);
+	
+	$last_inserted_line_res = ms_db_query("SELECT IDENT_CURRENT('Movements') AS LAST");
+	$last_inserted_line_row = mssql_fetch_array($last_inserted_line_res);
+	$movement_id = $last_inserted_line_row['LAST'];
+	
+	$sql = "SELECT * FROM ".TB_PREF."rms_items WHERE rs_id=$rs_id";
+	$res = db_query_rs($sql);
+		
+	while($row = db_fetch($res)) //Products and Product History
+	{
+		// $pos_row = get_pos_product
+		$prod_row = get_product_row($row['prod_id']);
+		$pos_prod_row = get_pos_product_row($row['barcode']);
+		
+		$pack = $pos_prod_row['qty'];
+		$pcs_qty = ($pack * $row['qty']);
+		
+		if ($MovementCode == 'SA2BO')
+		{
+			$beg_sa = $prod_row['SellingArea'];
+			$beg_damaged = $prod_row['Damaged'];
+			$dmg_in = $sa_out = $pcs_qty;
+			$dmg_out = 'NULL';
+		}
+		else //if ($MovementCode == 'R2SSA')
+		{
+			$dmg_out = $pcs_qty;
+			$beg_damaged = $prod_row['Damaged'];
+		}
+		
+		
+		$producthistory = "INSERT INTO [ProductHistory]([ProductID],[Barcode],[TransactionID],[TransactionNo],[DatePosted]
+				  ,[TransactionDate],[Description],[BeginningSellingArea],[BeginningStockRoom],[FlowStockRoom],[FlowSellingArea]
+				  ,[SellingAreaIn],[SellingAreaOut],[StockRoomIn],[StockRoomOut],[UnitCost],[DamagedIn],[DamagedOut],[LayawayIn]
+				  ,[LayawayOut],[OnRequestIn],[OnRequestOut],[PostedBy],[DateDeleted],[DeletedBy],[MovementCode],[TerminalNo]
+				  ,[LotNo],[ExpirationDate],[SHAREWITHBRANCH],[CANCELLED],[CANCELLEDBY],[BeginningDamaged],[FlowDamaged])
+			  VALUES(".$row['prod_id'].",'".$row['barcode']."',$movement_id,'$movement_no',CURRENT_TIMESTAMP, 
+				  CONVERT (date, CURRENT_TIMESTAMP), '$prod_history_desc', $beg_sa, 0, $flow_stockroom, 
+				  $flow_sa, NULL,".
+				  $sa_out.", NULL, 
+				  NULL, ".$row['price'].",$dmg_in,
+				  $dmg_out, NULL, NULL, NULL, NULL, '".$_SESSION['wa_current_user']->user."', NULL, NULL, '$MovementCode', '',
+				  0, NULL, 0, 0, '', $beg_damaged, $flow_dmg)";
+		ms_db_query($producthistory);
+		
+		if ($MovementCode == 'SA2BO')
+		{
+			$prod_sql = "UPDATE Products SET 
+						SellingArea = SellingArea - ".$pcs_qty.",
+						Damaged = Damaged + ". $pcs_qty ."
+					WHERE ProductID = ". $row['prod_id'];
+		}
+		else
+		{
+			$prod_sql = "UPDATE Products SET 
+						Damaged = Damaged - ". $pcs_qty ."
+					WHERE ProductID = ". $row['prod_id'];
+		}
+		
+		ms_db_query($prod_sql);
+	}
+	return $movement_no;
+}
+
+function get_rs_header($rs_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."rms_header
+			WHERE rs_id=$rs_id";
+	$res = db_query_rs($sql,'No RMS header found');
+	$row = db_fetch($res);
+	
+	return $row;
+}
+
+function get_rs_items($rs_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."rms_items
+			WHERE rs_id=$rs_id
+			ORDER BY id";
+	$res = db_query_rs($sql);
+	return $res;
+}
+
+function get_next_rs_id()
+{
+	$sql = "select max(rs_id)+1 from 0_rms_items";
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	
+	return $row[0];
+}
+
+
+function get_movement_items($m_type, $m_no)
+{
+	$sql = "SELECT prod_id,barcode,item_name,uom,SUM(qty) as qty,orig_uom,orig_multiplier,
+				custom_multiplier,price,a.supplier_code
+			FROM 0_rms_header a, 0_rms_items b
+			WHERE a.movement_type = '$m_type' 
+			AND a.movement_no = $m_no
+			AND a.rs_id = b.rs_id
+			GROUP BY prod_id,barcode,item_name,uom,orig_uom,orig_multiplier,
+				custom_multiplier,price,supplier_code
+			ORDER BY item_name;";
+	$res = db_query_rs($sql);
+	return $res;
+}
+
+function get_rs_ids($m_type, $m_no, $return_str=true)
+{
+	$sql = "SELECT rs_id FROM ".TB_PREF."rms_header
+			WHERE movement_type = '$m_type'
+			AND movement_no = $m_no";
+	$res = db_query_rs($sql);
+	$rs_ids = array();
+	while($row = db_fetch($res))
+	{
+		$rs_ids[] = $row['rs_id'];
+	}
+	
+	if ($return_str)
+		return implode(',',$rs_ids);
+}
+
+function get_ms_supp_name($supp_code)
+{
+	$sql = "SELECT description FROM vendor
+			WHERE vendorcode = '$supp_code'";
+	$res = ms_db_query($sql);
+	$row = mssql_fetch_array($res);
+	return $row[0];
+}
+
+function supp_last_rs_action($supplier_code)
+{
+	// action - 0 no action , 1 return , 2 dispose
+	$default_rs_action = 0;
+	$sql = "SELECT rs_action FROM ".TB_PREF."rms_header WHERE supplier_code = ".db_escape($supplier_code)."
+			ORDER BY rs_id DESC LIMIT 1";
+	$res = db_query_rs($sql);
+	
+	if (db_num_rows($res) == 0)
+		return $default_rs_action;
+	
+	$row = db_fetch($res);
+	return $row[0];
+}
+
+
+function non_item_line($txt,$align='c')
+{
+	$max_len = strlen($txt);
+	// $max_char = 32; //font 10
+	$max_char = 38; //font 9
+	$text = '';
+	
+	$pad = STR_PAD_BOTH;
+	
+	if ($align =='l') //left
+		$pad = STR_PAD_RIGHT;
+	if ($align =='r') //right
+		$pad = STR_PAD_LEFT;
+	
+	for($x=1; $x<=ceil($max_len/$max_char); $x++)
+	{
+		$text .= str_pad(substr($txt,(($x-1)*$max_char),$max_char), $max_char, " ", $pad). PHP_EOL;
+	}
+	return $text;
+}
+
+function item_line($row)
+{
+	$row['item_name'] = trim($row['item_name']);
+	$max_len_item = strlen($row['item_name']);
+	// $max_char = 32; //font 10
+	$max_char_name = 24; //font 9
+	$max_char_qty = 4; //font 9
+	$max_char_amount = 8; //font 9
+	$text = '';
+	
+	$pad = STR_PAD_RIGHT;
+	
+	$text .= str_pad(substr($row['item_name'],0,$max_char_name), $max_char_name, " ", STR_PAD_RIGHT) . ' ';
+	$text .= str_pad($row['qty'], $max_char_qty, " ", STR_PAD_LEFT) . ' ';
+	$text .= str_pad(number_format($row['price'],3,'.',''), $max_char_amount, " ", STR_PAD_LEFT);
+	
+	for($x=2; $x<=ceil($max_len_item/$max_char_name); $x++)
+	{
+		$text .= PHP_EOL . str_pad(substr($row['item_name'],(($x-1)*$max_char_name),$max_char_name), $max_char_name, " ", $pad);
+	}
+
+	return $text . PHP_EOL;
+}
+
+function print_rs($id,$copy=1) // change copy to -1 for 3 copies
+{
+	global $db_connections;
+	$x = 3;
+	$copy_id = 0;
+	
+	if($copy != -1)
+	{
+		$x = 1;
+		$copy_id = $copy;
+	}
+	
+	$copy_name = array('*** Supplier\'s Copy ***','*** Warehouse Copy ***','*** Accounting Copy ***');
+		
+	//----------------------- priiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiinnnnnnnnnnnnnttttttttttttttt
+	
+	for($i=1;$i<=$x;$i++)
+	{
+		$fp = fopen('C:/test_print.txt','w');
+
+		fwrite($fp, PHP_EOL . non_item_line($db_connections[$_SESSION["wa_current_user"]->company]["name"]));
+		
+		$rs_h_row = get_rs_header($id);
+		
+		if ($copy_id == 1) // warehouse
+		{
+			fwrite($fp, PHP_EOL . non_item_line('SA to BO Slip'));
+			fwrite($fp, PHP_EOL . non_item_line('No. '.$id) . PHP_EOL);
+		}
+		else // return or disposal. query here
+		{
+			if ($rs_h_row['movement_type'] == 'R2SSA') // supplier return. print real RS#
+			{
+				fwrite($fp, PHP_EOL . non_item_line('Return to Supplier Slip'));
+				fwrite($fp, PHP_EOL . non_item_line('No. '.$rs_h_row['movement_no']) . PHP_EOL);
+			}
+			else if ($rs_h_row['movement_type'] == 'FDFB') // Disposal
+			{
+				fwrite($fp, PHP_EOL . non_item_line('For Disposal From BO Slip'));
+				fwrite($fp, PHP_EOL . non_item_line('No. '.$rs_h_row['movement_no']) . PHP_EOL);
+			}
+		}
+		
+		
+		$sql = "SELECT * FROM  ".TB_PREF."rms_items
+				WHERE rs_id = $id";
+		$res = db_query_rs($sql);
+		
+		$header = true;
+		$total_qty = $totalcost = 0;
+		while($row = db_fetch($res))
+		{
+			if($header)
+			{
+				fwrite($fp, non_item_line('Supplier: '.get_ms_supp_name($row['supplier_code']),'l') . PHP_EOL);
+				fwrite($fp, non_item_line('Date: '.Today(),'l') . PHP_EOL);
+				
+				//items header
+				// 24 - 1 - 4 - 1 - 8
+				fwrite($fp, non_item_line( str_pad('Product', 24, " ", STR_PAD_BOTH).' '.
+										   str_pad('QTY', 4, " ", STR_PAD_LEFT).' '.
+										   str_pad('U.COST', 8, " ", STR_PAD_BOTH),'l'));
+				$header = false;
+			}
+			
+			$total_qty += $row['qty'];
+			$totalcost += round2($row['qty']*$row['price'],3);
+			fwrite($fp, item_line($row));
+		}
+		
+		fwrite($fp, non_item_line('--------------------------------------'));
+		fwrite($fp, non_item_line('TOTAL QTY: '.$total_qty) . PHP_EOL);
+		fwrite($fp, non_item_line('TOTAL AMOUNT: '.number_format2($totalcost,3)));
+		fwrite($fp, non_item_line('--------------------------------------'));
+		
+		if ($rs_h_row['comment'] != '')
+		{
+			fwrite($fp, non_item_line('REMARKS : ','l'));
+			fwrite($fp, non_item_line('   '.$rs_h_row['comment'],'l'));
+			fwrite($fp, non_item_line('--------------------------------------'));
+		}
+		
+		fwrite($fp, non_item_line('Prepared by: '.strtoupper($_SESSION['wa_current_user']->name),'l') . PHP_EOL);
+		fwrite($fp, non_item_line('Checked  by: '.strtoupper($_SESSION['wa_current_user']->name),'l') . PHP_EOL . PHP_EOL);
+		fwrite($fp, 'Received by: _________________________' . PHP_EOL . PHP_EOL);
+		
+		fwrite($fp, PHP_EOL . non_item_line($copy_name[$copy_id]));
+		// fwrite($fp, non_item_line('*** Supplier\'s Copy ***') . PHP_EOL);
+		// fwrite($fp, non_item_line('*** Warehouse Copy ***') . PHP_EOL);
+		// fwrite($fp, non_item_line('*** Accounting Copy ***') . PHP_EOL);
+		fwrite($fp, PHP_EOL . non_item_line('--------------------------------------'));
+		fclose($fp);
+
+		$bat_file = 'C:/print_receipt.bat';
+		$fp = fopen($bat_file,'w');
+		fwrite($fp, 'NOTEPAD /P C:/test_print.txt');
+		fclose($fp);
+
+		exec($bat_file);
+		
+		$copy_id ++;
+	}
+
+}
+
+function process_rs($rs_id, $rs_action)
+{
+	if ($rs_action != 0)
+		$sql = "UPDATE ".TB_PREF."rms_header SET 
+					rs_action = ".($rs_action+0).",
+					processed = 1,
+					processed_by = ".$_SESSION['wa_current_user']->user."
+				WHERE rs_id=$rs_id";
+	else
+		$sql = "UPDATE ".TB_PREF."rms_header SET 
+					rs_action = 0
+				WHERE rs_id=$rs_id";
+	
+	db_query_rs($sql,'failed to update/process RMS');
+	
+	if ($rs_action == 1) //return
+	{
+		$movement_no = ms_movement($rs_id,'R2SSA');
+		$sql = "UPDATE ".TB_PREF."rms_header SET 
+					movement_type = 'R2SSA',
+					movement_no = $movement_no
+				WHERE rs_id=$rs_id";
+		db_query_rs($sql,'failed to update movement (R2SSA)');
+	}
+	if ($rs_action == 2) //dispose
+	{
+		$movement_no = ms_movement($rs_id,'FDFB');
+		$sql = "UPDATE ".TB_PREF."rms_header SET 
+					movement_type = 'FDFB',
+					movement_no = $movement_no
+				WHERE rs_id=$rs_id";
+		db_query_rs($sql,'failed to update movement (R2SSA)');
+	}
+}
+
+function create_debit_memo_for_rs($rs_ids)
+{
+	global $Refs;
+	
+	$rs_id_str = implode(',',$rs_ids);
+	$sql = "SELECT DISTINCT supplier_code FROM 0_rms_header 
+			WHERE rs_id IN (".$rs_id_str.")";
+	$res = db_query_rs($sql,'failed to get supplier code from rs server');
+	
+	if (db_num_rows($res) != 1)
+	{
+		display_error('All Returns must have the same supplier');
+		return false;
+	}
+	$row = db_fetch($res);
+	$supp_code = $row[0];
+	$supp_id = check_my_suppliers($supp_code);
+	
+	if ($supp_id == '')
+	{
+		display_error('Supplier does not exist for RS# '. $rs_id_str);
+		return false;
+	}
+	// $sql = "SELECT ROUND(SUM(qty*price),2) FROM 0_rms_items 
+			// WHERE rs_id IN (".$rs_id_str.")";
+	$sql = "SELECT movement_no FROM 0_rms_header 
+			WHERE rs_id IN (".$rs_id_str.")";
+	$res = db_query_rs($sql);
+	$real_rs = array();
+	while($rrow = db_fetch($res))
+		$real_rs[] = $rrow[0];
+	$real_rs_str = implode(', ',$real_rs);
+	
+	$sql = "SELECT ROUND(SUM(b.qty*b.price),2) 
+			FROM 0_rms_header a, 0_rms_items b
+			WHERE a.movement_no IN ($real_rs_str)
+			AND a.movement_type = 'R2SSA'
+			AND a.rs_id = b.rs_id";
+			
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	$total = $row[0];
+	
+	
+	// insert supp trans for debit memo 
+	$reference = $Refs->get_next(ST_SUPPDEBITMEMO);
+	$trans_no = add_supp_trans(ST_SUPPDEBITMEMO, $supp_id, Today(), '',
+			$reference, 'RS#'.implode(', ',$real_rs), -$total,  0, 0, "", 0, 0);
+	
+	// GL entries
+	$company_record = get_company_prefs();
+	$debit_account = $company_record['creditors_act']; //accounts_payable
+	$credit_account = '5500'; // purchase returns and allowances
+	
+	add_gl_trans_supplier(ST_SUPPDEBITMEMO, $trans_no, Today(), $debit_account, 
+				0,0,$total, $supp_id,"The general ledger transaction for the control total could not be added");
+	add_gl_trans_supplier(ST_SUPPDEBITMEMO, $trans_no, Today(), $credit_account, 
+				0,0,-$total, $supp_id,"The general ledger transaction for the control -total could not be added");
+
+	$Refs->save(ST_SUPPDEBITMEMO, $trans_no, $reference);
+	//===========================================================================
+				
+	$sql = "UPDATE ".TB_PREF."rms_header SET 
+				acct_processed_date = '".date2sql(Today())."',
+				acct_processed_by = ".$_SESSION['wa_current_user']->user.",
+				trans_type = ".ST_SUPPDEBITMEMO.",
+				trans_no = $trans_no
+			WHERE movement_no IN ($real_rs_str)
+			AND movement_type = 'R2SSA'";
+	// display_error($sql);
+	db_query_rs($sql,'failed to assign trans_no to RS');
+	return $trans_no;
+}
+
+function create_journal_for_rs($rs_ids,$j_remarks)
+{
+	global $Refs;
+	
+	$rs_id_str = implode(', ',$rs_ids);
+	$type = ST_JOURNAL;
+	$trans_no = get_next_trans_no($type);
+	$reference = $Refs->get_next($type);
+	$date_ = Today();
+	$debit_account = '80002'; // losses from spoilage
+	$credit_account = '5300'; // Inventory Adjustment
+	
+	$sql = "SELECT movement_no FROM ".TB_PREF."rms_header
+			WHERE rs_id IN ($rs_id_str)";
+	// display_error($sql);
+	$res = db_query_rs($sql);
+	$m_nos = array();
+	
+	while($row = db_fetch($res))
+		$m_nos[] = $row[0];
+	
+	// $sql = "SELECT a.supplier_code, a.movement_type, a.movement_no, ROUND(SUM(b.qty*b.price),2) as amount
+			// FROM 0_rms_header a, 0_rms_items b 
+			// WHERE a.rs_id IN ($rs_id_str)
+			// AND a.rs_id = b.rs_id
+			// GROUP BY b.rs_id";
+	$sql = "SELECT a.supplier_code, a.movement_type, a.movement_no, ROUND(SUM(b.qty*b.price),2) as amount
+			FROM 0_rms_header a, 0_rms_items b 
+			WHERE a.movement_no IN (".implode(',',$m_nos).")
+			AND movement_type = 'FDFB'
+			AND a.rs_id = b.rs_id
+			GROUP BY a.movement_no";
+	// display_error($sql);
+	$res = db_query_rs($sql);
+	
+	$supp_id = $total = 0;
+	while($row = db_fetch($res))
+	{
+		$total += $row['amount'];
+		$supp_id = check_my_suppliers($row['supplier_code']);
+		add_gl_trans_supplier(ST_JOURNAL, $trans_no, $date_, $debit_account, 0,0,$row['amount'], $supp_id,
+		"The general ledger transaction for the control total could not be added",0,
+		$row['movement_type'].'#'.$row['movement_no']);
+	}
+	
+	add_gl_trans($type, $trans_no, $date_, $credit_account, 0, 0, '',-$total);
+	
+	add_comments($type, $trans_no, $date_, $j_remarks);
+	$Refs->save($type, $trans_no, $reference);
+	//===========================================================================
+				
+	$sql = "UPDATE ".TB_PREF."rms_header SET 
+				acct_processed_date = '".date2sql(Today())."',
+				acct_processed_by = ".$_SESSION['wa_current_user']->user.",
+				trans_type = ".ST_JOURNAL.",
+				trans_no = $trans_no
+			WHERE movement_no IN (".implode(',',$m_nos).")
+			AND movement_type = 'FDFB'";
+	db_query_rs($sql,'failed to assign trans_no to RS (journal)');
+	
+	return $trans_no;
+}
+
+function get_username_by_id_rs($id)
+{
+	$sql = "SELECT real_name FROM ".TB_PREF."users WHERE id = $id";
+	$res = db_query_rs($sql);
+	$row = db_fetch($res);
+	return $row[0];
+}
+
+?>

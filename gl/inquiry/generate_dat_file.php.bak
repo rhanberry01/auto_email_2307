@@ -1,0 +1,598 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+
+$page_security = 'SA_GLANALYTIC';
+$path_to_root="../..";
+
+include($path_to_root . "/includes/db_pager.inc");
+include_once($path_to_root . "/includes/session.inc");
+
+include_once($path_to_root . "/includes/date_functions.inc");
+include_once($path_to_root . "/includes/ui.inc");
+include_once($path_to_root . "/modules/checkprint/includes/cv_mailer.inc");
+
+$js = "";
+if ($use_popup_windows)
+	$js .= get_js_open_window(800, 400);
+if ($use_date_picker)
+	$js .= get_js_date_picker();
+
+// page(_($help_context = "Generate .DAT File"), false, false, "", $js);
+page(_($help_context = "For VAT Relief (Purchases)"), false, false, "", $js);
+
+// //-----------------------------------------------------------------------------------
+// // Ajax updates
+// //
+// if (get_post('Search'))
+// {
+	// $Ajax->activate('journal_tbl');
+// }
+// //--------------------------------------------------------------------------------------
+// if (!isset($_POST['filterType']))
+	// $_POST['filterType'] = -1;
+
+// if (isset($_POST['Search']))
+// {
+	// global $Ajax;
+	
+	// $Ajax->activate('tbl_');
+// }
+
+function load_trade_purchases($from_date, $to_date){
+	global $db_connections;
+	
+	$query_ = array();
+	
+	foreach($db_connections as $key=>$db_con)
+	{
+		if($db_con['ms_host'] == '')
+			continue;
+		
+		$sql = "(SELECT b.supp_name, b.contact, b.gst_no,
+						SUM(IF(account='5450',amount,0)) as 'p_vat',	 
+						SUM(IF(account='1410010',amount,0)) as 'i_tax',
+						SUM(IF(account='5400',amount,0)) as 'p_n_vat'
+					FROM ".$db_con['dbname'].".`0_gl_trans` a, ".$db_con['dbname'].".`0_suppliers` b
+					WHERE person_type_id = 3
+					AND tran_date >= '".date2sql($from_date)."'
+					AND tran_date <= '".date2sql($to_date)."'
+					AND amount > 0
+					AND a.person_id = b.supplier_id
+					AND b.gst_no != ''
+					GROUP BY person_id
+					HAVING SUM(IF(account='5450',amount,0)) > 0
+					ORDER BY b.supp_name, b.gst_no)";
+					
+			$query_[] = $sql;
+	}
+		$sql = "SELECT supp_name, gst_no, SUM(p_vat) as p_vat, SUM(i_tax) as i_tax, SUM(p_n_vat) as p_n_vat FROM (";
+		
+		$sql .= implode ( ' UNION ' , $query_);
+		/*
+		//group by supp_name and gst_no
+		$sql .= ") xxx
+					GROUP BY supp_name,REPLACE(REPLACE(TRIM(gst_no), '-', ' '), ' ', '')
+					ORDER BY supp_name, gst_no"; 
+		*/
+		$sql .= ") xxx
+					GROUP BY REPLACE(REPLACE(TRIM(gst_no), '-', ' '), ' ', '')
+					ORDER BY supp_name, gst_no";
+		$res = db_query($sql,'error.');
+		// display_error("TRADE---".$sql);
+		return $res;
+}
+function load_non_trade_purchases($from_date, $to_date){
+	global $db_connections;
+	
+	$query_ = array();
+	
+	foreach($db_connections as $key=>$db_con)
+	{
+		if($db_con['ms_host'] == '')
+			continue;
+	
+		$sql = "
+					(SELECT
+						'".date2sql($to_date)."' as nt_date ,pcd_payee, pcd_tin, SUM(pcd_amount) as tot_amount, SUM(pcd_tax) as tot_tax
+					FROM
+						".$db_con['dbname'].".0_petty_cash_details
+					WHERE
+						pcd_date >= '".date2sql($from_date)."'
+					AND pcd_date <= '".date2sql($to_date)."'
+					AND pcd_ref != ''
+					AND pcd_ref != '0'
+					AND pcd_w_cv = '1'
+					GROUP BY pcd_tin, pcd_payee
+					ORDER BY
+						pcd_date)
+					";
+					
+		$query_[] = $sql;
+	}		
+	
+	$sql = "SELECT '".date2sql($to_date)."' as nt_date ,pcd_payee, pcd_tin, SUM(tot_amount) as tot_amount, SUM(tot_tax) as tot_tax FROM (";
+	
+	$sql .= implode ( ' UNION ' , $query_);
+	
+	/*
+	//group by with tin and payee
+	$sql .= ") xxx
+					GROUP BY TRIM(pcd_tin), TRIM(pcd_payee)
+					ORDER BY
+						nt_date";
+	*/
+	
+	$sql .= ") xxx
+					GROUP BY TRIM(pcd_tin)
+					ORDER BY
+						nt_date";
+	
+	$res = db_query($sql,'error.');
+	// display_error("NONTRADE---".$sql);
+	return $res;
+}
+function csv_dl_link($r_id) 
+{
+	global $path_to_root;
+	$id = default_focus();
+	// $target = $path_to_root.'/csv/'.$row['csv_file'];
+
+	$target = $path_to_root.'/modules/checkprint/csv_download.php?id='.$r_id;
+	return "<a href='$target' id='$id' onclick=\"javascript:openWindow(this.href,this.target); 
+		return false;\"><b>Download CSV File</b></a>";
+}
+
+$filename = '';
+
+if(isset($_POST['submit_btn']))
+{
+	
+	$con = array();
+	
+	$supplier = $_POST['supplier'];
+	
+	//-----Initial value of header only. Values will be updated at the end of the loop.
+	$con[0] = array('H','P',"007492840","SRS RETAIL SYSTEMS INC.","","","",
+							"SRS RETAIL SYSTEMS INC","DUMALAY ST. CORNER QUIRINO HIGHWAY ",
+							"NOVALICHES QUEZON CITY 1123",
+							16687505.27,0.00,0.00,11820.13,438819178.17,52659719.08,52659719.08,0.00,028,
+							date('m/d/Y', strtotime($_POST['to_date'])),12);
+	// $con[] = array('D','P',"109163167","SANTISTEBAN","PHIMY","E.","MARIGMAN ST. GOLDEN HILLS","BRGY. SAN ROQUE ANTIPOLO CITY",22899.50,0,0,0,0,0,007492840,"07/31/2015");
+	
+	// $sql = "SELECT b.supp_name, b.address b.gst_no,
+					// SUM(IF(account='5450',amount,0)) as 'p_vat',	 
+					// SUM(IF(account='1410010',amount,0)) as 'i_tax'
+				// FROM `0_gl_trans` a, `0_suppliers` b
+				// WHERE person_type_id = 3
+				// AND tran_date >= '".date2sql($_POST['from_date'])."'
+				// AND tran_date <= '".date2sql($_POST['to_date'])."'
+				// AND amount > 0
+				// AND a.person_id = b.supplier_id
+				// AND b.gst_no != ''
+				// GROUP BY person_id
+				// HAVING SUM(IF(account='5450',amount,0)) > 0
+				// ORDER BY b.supp_name";
+	// $res = db_query($sql,'error.');
+	$counter = 0;
+	
+	$gross_purchase_amt = $exempt_purchase_amt = $zero_rated_amt = 
+	$taxable_purchase_amt = $purch_services_amt = $purch_capital_goods_amt = $purchase_non_vat_amt =
+	$purch_goods_other_than_capital_goods = $input_tax_amt = $gross_taxable_purch_amt = 0;
+	
+	// $tot_gross_purchase = $tot_input_tax_amt = 0;
+	// $tot_gross_purchase2 = $tot_input_tax_amt2 = 0;
+	
+	$tot_gross_purchase = $tot_input_tax_amt = $tot_purchase_non_vat_amt = 
+	$tot_zero_rated_amt = $tot_taxable_purchase_amt = $tot_purch_services_amt = 
+	$tot_purch_capital_goods_amt = $tot_purch_goods_other_than_capital_goods = 
+	$tot_gross_taxable_purch_amt = 0;
+				
+	$tot_gross_purchase2 = $tot_input_tax_amt2 = $tot_purchase_non_vat_amt2 = 
+	$tot_zero_rated_amt2 = $tot_taxable_purchase_amt2 = $tot_purch_services_amt2 = 
+	$tot_purch_capital_goods_amt2 = $tot_purch_goods_other_than_capital_goods2 = 
+	$tot_gross_taxable_purch_amt2 = 0;
+	
+	$res = load_trade_purchases($_POST['from_date'], $_POST['to_date']);
+	while($row = db_fetch($res)){
+		$counter++;
+		
+		$supp_name = $row['supp_name'];
+		$contact = $row['contact'];
+		$address = $row['address'];
+		$tin = str_replace("-", "", trim($row['gst_no']));
+		// $tin = substr($tin, 0, -4);
+		$tin = substr($tin, 0, 9);
+		$tin = addslashes($tin);
+		
+		$taxable_purchase_amt = round($row['p_vat'],2);
+		$purchase_non_vat_amt = round($row['p_n_vat'],2);
+		$purch_goods_other_than_capital_goods = round($row['p_vat'],2);
+		$input_tax_amt = round($row['i_tax'],2);
+		
+		$gross_purchase_amt = ($taxable_purchase_amt + $purchase_non_vat_amt);
+		$gross_taxable_purch_amt = ($taxable_purchase_amt + $input_tax_amt);
+		
+		/* enddate | tin | regname | suppname | suppaddress | grosspurchamt | exemptpurchamt | zeroratedpurch | taxablepurch | purchsvc | purchcapgoods | purchgoodsthancapgoods | inputtax | grosstaxpurch */
+		
+		/* Original */
+		$con[] = array('D','P','"'.$tin.'"','"'.$supp_name.'"',"","",'"'.$address.'"',"",0,0,0,0,$taxable_purchase_amt,$input_tax_amt,get_company_pref('gst_no'),date('m/d/Y', strtotime($_POST['to_date'])));
+		
+		// $tot_gross_purchase += $gross_purchase_amt;
+		// $tot_input_tax_amt += $input_tax_amt;
+		$tot_gross_purchase += $gross_purchase_amt;
+		$tot_purchase_non_vat_amt += $purchase_non_vat_amt;
+		$tot_zero_rated_amt += $zero_rated_amt;
+		$tot_taxable_purchase_amt += $taxable_purchase_amt;
+		$tot_purch_services_amt += $purch_services_amt;
+		$tot_purch_capital_goods_amt += $purch_capital_goods_amt;
+		$tot_purch_goods_other_than_capital_goods += $purch_goods_other_than_capital_goods;
+		$tot_input_tax_amt += $input_tax_amt;
+		$tot_gross_taxable_purch_amt += $gross_taxable_purch_amt;
+	
+	}
+	
+	/*  */
+	
+	$gross_purchase_amt2 = $exempt_purchase_amt2 = $zero_rated_amt2 = 
+	$taxable_purchase_amt2 = $purch_services_amt2 = $purch_capital_goods_amt2 = 
+	$purch_goods_other_than_capital_goods2 = $input_tax_amt2 = $gross_taxable_purch_amt2 = 0;
+	
+	$res2 = load_non_trade_purchases($_POST['from_date'], $_POST['to_date']);
+	while($row2 = db_fetch($res2)){
+		$counter++;
+		$supp_name2 = $row2['pcd_payee'];
+		$address2 = '';
+		$tin2 = str_replace("-", "", trim($row2['pcd_tin']));
+		// $tin = substr($tin, 0, -4);
+		$tin2 = substr($tin2, 0, 9);
+		$tin2 = addslashes($tin2);
+		
+		$exempt_purchase_amt2 = 0;
+		if($row2['tot_tax'] == 0){
+			$exempt_purchase_amt2 = round($row2['tot_amount'],2);
+			$taxable_purchase_amt2 = 0;
+			$purch_goods_other_than_capital_goods2 = 0;
+			$input_tax_amt2 = 0;
+			$gross_taxable_purch_amt2 = 0;
+		}else{
+			$taxable_purchase_amt2 = round($row2['tot_amount'],2);
+			$purch_goods_other_than_capital_goods2 = round($row2['tot_amount'],2);
+			$input_tax_amt2 = round($row2['tot_tax'],2);
+			$gross_taxable_purch_amt2 = ($taxable_purchase_amt2 + $input_tax_amt2);
+		}
+		$gross_purchase_amt2 = ($taxable_purchase_amt2 + $exempt_purchase_amt2);
+		
+		// $gross_purchase_amt2 = round($row2['tot_amount'],2);
+		// $taxable_purchase_amt2 = round($row2['tot_amount'],2);
+		// $purch_goods_other_than_capital_goods2 = round($row2['tot_amount'],2);
+		// $input_tax_amt2 = round($row2['tot_tax'],2);
+		// $gross_taxable_purch_amt2 = ($gross_purchase_amt2 + $input_tax_amt2);
+		
+		/* enddate | tin | regname | suppname | suppaddress | grosspurchamt | exemptpurchamt | zeroratedpurch | taxablepurch | purchsvc | purchcapgoods | purchgoodsthancapgoods | inputtax | grosstaxpurch */
+		
+		/* Original */
+		/* $con[] = array('D','P','"'.$tin2.'"','"'.strtoupper(html_entity_decode($supp_name2)).'"',"","",'"'.strtoupper(html_entity_decode($address2)).'"',"",0,0,0,0,$gross_purchase_amt2,$input_tax_amt2,get_company_pref('gst_no'),date('m/d/Y', strtotime($_POST['to_date']))); */
+		/* Latest */
+		if($row2['tot_tax'] == 0){
+			$con[] = array('D','P','"'.$tin2.'"','"'.strtoupper(html_entity_decode($supp_name2)).'"',"","",'"'.strtoupper(html_entity_decode($address2)).'"',"",$exempt_purchase_amt2,0,0,0,0,0,get_company_pref('gst_no'),date('m/d/Y', strtotime($_POST['to_date'])));
+		}else{
+			$con[] = array('D','P','"'.$tin2.'"','"'.strtoupper(html_entity_decode($supp_name2)).'"',"","",'"'.strtoupper(html_entity_decode($address2)).'"',"",0,0,0,0,$taxable_purchase_amt2,$input_tax_amt2,get_company_pref('gst_no'),date('m/d/Y', strtotime($_POST['to_date'])));
+		}
+		
+		// $tot_gross_purchase2 += $gross_purchase_amt2;
+		// $tot_input_tax_amt2 += $input_tax_amt2;
+		
+		$tot_gross_purchase2 += $gross_purchase_amt2;
+		$tot_purchase_non_vat_amt2 += $exempt_purchase_amt2;
+		$tot_zero_rated_amt2 += $zero_rated_amt2;
+		$tot_taxable_purchase_amt2 += $taxable_purchase_amt2;
+		$tot_purch_services_amt2 += $purch_services_amt2;
+		$tot_purch_capital_goods_amt2 += $purch_capital_goods_amt2;
+		$tot_purch_goods_other_than_capital_goods2 += $purch_goods_other_than_capital_goods2;
+		$tot_input_tax_amt2 += $input_tax_amt2;
+		$tot_gross_taxable_purch_amt2 += $gross_taxable_purch_amt2;
+	}
+	
+	$con[0] = array('H','P',"007492840","SRS RETAIL SYSTEMS INC.","","","",
+							"SRS RETAIL SYSTEMS INC","DUMALAY ST. CORNER QUIRINO HIGHWAY ",
+							"NOVALICHES QUEZON CITY 1123",
+							($tot_purchase_non_vat_amt+$tot_purchase_non_vat_amt2),'0.00','0.00',($tot_purch_capital_goods_amt+$tot_purch_capital_goods_amt2),($tot_purch_goods_other_than_capital_goods+$tot_purch_goods_other_than_capital_goods2),($tot_input_tax_amt+$tot_input_tax_amt2),($tot_input_tax_amt+$tot_input_tax_amt2),'0.00','028',
+							date('m/d/Y', strtotime($_POST['to_date'])),12);
+	
+	// $con[] = array('---'.$counter); //-----Pangcheck ng total number of rows returned
+	
+	if (!file_exists($path_to_root.'/dat')) {
+		mkdir($path_to_root.'/dat', 0777, true);
+	}
+
+	$filename = get_company_pref('gst_no')."P".date('m', strtotime($_POST['to_date']))."".date('Y', strtotime($_POST['to_date'])).".DAT";
+	
+	$fp = fopen($path_to_root."/dat/$filename","wb");
+	
+	// foreach ($list as $fields) {
+	$contents = '';
+	foreach ($con as $fields) {
+		// fputcsv($fp, $fields);
+		$contents .= implode(',',$fields) . PHP_EOL;
+	}
+	fwrite($fp,$contents);
+	fclose($fp);
+	
+	/* Download .DAT file to Google Chrome */
+	// $target = $path_to_root."/dat/".$filename;
+
+	// if (file_exists($target))
+	// {
+		// header("Content-Disposition: attachment; filename='$filename'");
+		// readfile($target);
+	// }
+
+	/* 
+	//-----sample generation of txt file
+	$content = "";
+	
+	$content = "SRS [R32015.".date('m').date('d')."1027]" . PHP_EOL;
+	// $content .= "Date : ".date('M d, Y')." " . PHP_EOL;
+	$content .= "Date : ".$_POST['from_date']." to ".$_POST['to_date']." " . PHP_EOL;
+	$content .= PHP_EOL;
+
+	$content .= "FAMILY NAME     GIVEN NAME      MI  SS NUMBER       S.S.    E.C.   RMRK  DTHRD";
+	$content .= PHP_EOL;
+	$content .= PHP_EOL;
+	
+	$content .= PHP_EOL;
+	$content .= PHP_EOL;
+	
+	// if (!file_exists('payroll_attachments/sss/'.$fmt_month.$fs_year)) {
+		// mkdir('payroll_attachments/sss/'.$fmt_month.$fs_year, 0777, true);
+	// }
+	
+	if (!file_exists($path_to_root.'/dat')) {
+		mkdir($path_to_root.'/dat', 0777, true);
+	}
+	
+	$fp = fopen($path_to_root."/dat/PurchasesReport.DAT","wb");
+	fwrite($fp,$content);
+	fclose($fp); 
+	*/
+	
+	
+	display_notification('Successfully created .DAT file!');
+	
+	$_POST['display_btn'] = true;
+}
+	
+start_form();
+
+	start_table();
+		// text_cells('Supplier', 'supplier');
+		date_cells('From : ', 'from_date');
+		date_cells('To : ', 'to_date');
+		// submit_cells('display_btn', 'Display Result');
+		submit_cells('submit_btn', 'Display Result');
+	if($filename)
+	{
+		$tar = $path_to_root.'/gl/inquiry/dat_download.php?filename='.$filename;
+		label_cell("<a href='$tar' onclick=\"javascript:openWindow(this.href,this.target); 
+		return false;\"><b>Download .DAT File</b></a>");
+	}
+
+	end_table();
+	
+	br();
+	
+	div_start('content');
+	
+		if(isset($_POST['display_btn'])){
+			//-----FOR TRADE PURCHASES
+				$k = 0;
+				$gross_purchase_amt = $exempt_purchase_amt = $zero_rated_amt = 
+				$taxable_purchase_amt = $purch_services_amt = $purch_capital_goods_amt = 
+				$purch_goods_other_than_capital_goods = $input_tax_amt = $gross_taxable_purch_amt = 0;
+				$counter = 0;
+				
+				// $tot_gross_purchase = $tot_input_tax_amt = $tot_gross_taxable_purch_amt = 0;
+				// $tot_gross_purchase2 = $tot_input_tax_amt2 = $tot_gross_taxable_purch_amt2 = 0;
+				
+				$tot_gross_purchase = $tot_input_tax_amt = $tot_purchase_non_vat_amt = 
+				$tot_zero_rated_amt = $tot_taxable_purchase_amt = $tot_purch_services_amt = 
+				$tot_purch_capital_goods_amt = $tot_purch_goods_other_than_capital_goods = 
+				$tot_gross_taxable_purch_amt = 0;
+							
+				$tot_gross_purchase2 = $tot_input_tax_amt2 = $tot_purchase_non_vat_amt2 = 
+				$tot_zero_rated_amt2 = $tot_taxable_purchase_amt2 = $tot_purch_services_amt2 = 
+				$tot_purch_capital_goods_amt2 = $tot_purch_goods_other_than_capital_goods2 = 
+				$tot_gross_taxable_purch_amt2 = 0;
+				
+				display_heading('TRADE PURCHASES');
+				start_table($table_style2);
+					$th = array ('#', 'TIN', 'REGISTERED NAME', 'SUPPLIER\'S ADDRESS', 'GROSS PURCHASE AMT', 'EXEMPT PURCHASE AMT', 'ZERO-RATED AMT', 'TAXABLE PURCHASE AMT', 'PURCHASE OF SERVICES AMT', 'PURCHASE OF CAPITAL GOODS AMT', 'PURCHASE OF GOODS OTHER THAN CAPITAL GOODS AMT', 'INPUT TAX AMT', 'GROSS TAXABLE PURCHASE AMT');
+					
+					$res = load_trade_purchases($_POST['from_date'], $_POST['to_date']);
+					while($row = db_fetch($res)){
+					
+						if($counter % 10 == 0){
+							table_header($th);
+						}
+						
+						$counter++;
+						
+						$supp_name = $row['supp_name'];
+						$address = $row['address'];
+						$tin = str_replace("-", "", trim($row['gst_no']));
+						$tin = substr($tin, 0, 9);
+						$tin = addslashes($tin);
+						$company_gst_no = get_company_pref('gst_no');
+						
+						/* Input Tax Amount */
+						// $input_tax_amt = ($gross_purchase_amt * 0.12)+0;
+						$taxable_purchase_amt = round($row['p_vat'],2);
+						$exempt_purchase_amt = round($row['p_n_vat'],2);
+						$purch_goods_other_than_capital_goods = round($row['p_vat'],2);
+						$input_tax_amt = round($row['i_tax'],2);
+
+						$gross_purchase_amt = ($taxable_purchase_amt + $exempt_purchase_amt);
+						$gross_taxable_purch_amt = ($taxable_purchase_amt + $input_tax_amt);
+						
+						alt_table_row_color($k);
+							label_cell($counter);
+							label_cell($tin);
+							label_cell($supp_name);
+							label_cell($address);
+							amount_cell($gross_purchase_amt); //With Value
+							amount_cell($exempt_purchase_amt);
+							amount_cell($zero_rated_amt);
+							amount_cell($taxable_purchase_amt); //With Value (Amount is equal to Gross Purchase Amount)
+							amount_cell($purch_services_amt);
+							amount_cell($purch_capital_goods_amt);
+							amount_cell($purch_goods_other_than_capital_goods);  //With Value (Amount is equal to Gross Purchase Amount and Taxable Purchase Amount)
+							amount_cell($input_tax_amt); //With Value (Gross Purchase Amount * 0.12 = Input Tax Amount)
+							amount_cell($gross_taxable_purch_amt); //With Value (Gross Purchase Amount + Input Tax Amount = Gross Taxable Purchase Amount)
+						end_row();
+						
+						$tot_gross_purchase += $gross_purchase_amt;
+						$tot_purchase_non_vat_amt += $exempt_purchase_amt;
+						$tot_zero_rated_amt += $zero_rated_amt;
+						$tot_taxable_purchase_amt += $taxable_purchase_amt;
+						$tot_purch_services_amt += $purch_services_amt;
+						$tot_purch_capital_goods_amt += $purch_capital_goods_amt;
+						$tot_purch_goods_other_than_capital_goods += $purch_goods_other_than_capital_goods;
+						$tot_input_tax_amt += $input_tax_amt;
+						$tot_gross_taxable_purch_amt += $gross_taxable_purch_amt;
+						
+					}
+					
+					alt_table_row_color($k);
+					label_cell('     <b>TOTAL</b>', 'colspan = 4 align="right"');
+					amount_cell($tot_gross_purchase, true);
+					amount_cell($tot_purchase_non_vat_amt, true);
+					amount_cell($tot_zero_rated_amt, true);
+					amount_cell($tot_taxable_purchase_amt, true);
+					amount_cell($tot_purch_services_amt, true);
+					amount_cell($tot_purch_capital_goods_amt, true);
+					amount_cell($tot_purch_goods_other_than_capital_goods, true);
+					amount_cell($tot_input_tax_amt, true);
+					amount_cell($tot_gross_taxable_purch_amt, true);
+					end_row();
+					
+				end_table(1);
+				
+			//-----FOR NON-TRADE PURCHASES	
+			$k2 = 0;
+			$gross_purchase_amt2 = $exempt_purchase_amt2 = $zero_rated_amt2 = 
+			$taxable_purchase_amt2 = $purch_services_amt2 = $purch_capital_goods_amt2 = 
+			$purch_goods_other_than_capital_goods2 = $input_tax_amt2 = $gross_taxable_purch_amt2 = 0;
+			$counter2 = 0;
+				
+				display_heading('NON-TRADE PURCHASES');
+				start_table($table_style2);
+					$th = array ('#', 'TIN', 'REGISTERED NAME', 'SUPPLIER\'S ADDRESS', 'GROSS PURCHASE AMT', 'EXEMPT PURCHASE AMT', 'ZERO-RATED AMT', 'TAXABLE PURCHASE AMT', 'PURCHASE OF SERVICES AMT', 'PURCHASE OF CAPITAL GOODS AMT', 'PURCHASE OF GOODS OTHER THAN CAPITAL GOODS AMT', 'INPUT TAX AMT', 'GROSS TAXABLE PURCHASE AMT');
+					
+					$res2 = load_non_trade_purchases($_POST['from_date'], $_POST['to_date']);
+					while($row2 = db_fetch($res2)){
+					
+						if($counter2 % 10 == 0){
+							table_header($th);
+						}
+						
+						$counter2++;
+						
+						$supp_name2 = $row2['pcd_payee'];
+						// $address2 = $row2['address'];
+						$address2 = '';
+						$tin2 = str_replace("-", "", trim($row2['pcd_tin']));
+						$tin2 = substr($tin2, 0, 9);
+						$tin2 = addslashes($tin2);
+						$company_gst_no = get_company_pref('pcd_tin');
+						
+						$exempt_purchase_amt2 = 0;
+						if($row2['tot_tax'] == 0){
+							$exempt_purchase_amt2 = round($row2['tot_amount'],2);
+							$taxable_purchase_amt2 = 0;
+							$purch_goods_other_than_capital_goods2 = 0;
+							$input_tax_amt2 = 0;
+							$gross_taxable_purch_amt2 = 0;
+						}else{
+							$taxable_purchase_amt2 = round($row2['tot_amount'],2);
+							$purch_goods_other_than_capital_goods2 = round($row2['tot_amount'],2);
+							$input_tax_amt2 = round($row2['tot_tax'],2);
+							$gross_taxable_purch_amt2 = ($taxable_purchase_amt2 + $input_tax_amt2);
+						}
+						$gross_purchase_amt2 = ($taxable_purchase_amt2 + $exempt_purchase_amt2);
+						
+						alt_table_row_color($k2);
+							label_cell($counter2);
+							label_cell($tin2);
+							label_cell($supp_name2);
+							label_cell($address2);
+							amount_cell($gross_purchase_amt2); //With Value
+							amount_cell($exempt_purchase_amt2);
+							amount_cell($zero_rated_amt2);
+							amount_cell($taxable_purchase_amt2); //With Value (Amount is equal to Gross Purchase Amount)
+							amount_cell($purch_services_amt2);
+							amount_cell($purch_capital_goods_amt2);
+							amount_cell($purch_goods_other_than_capital_goods2);  //With Value (Amount is equal to Gross Purchase Amount and Taxable Purchase Amount)
+							amount_cell($input_tax_amt2); //With Value (Gross Purchase Amount * 0.12 = Input Tax Amount)
+							amount_cell($gross_taxable_purch_amt2); //With Value (Gross Purchase Amount + Input Tax Amount = Gross Taxable Purchase Amount)
+						end_row();
+						
+						$tot_gross_purchase2 += $gross_purchase_amt2;
+						$tot_purchase_non_vat_amt2 += $exempt_purchase_amt2;
+						$tot_zero_rated_amt2 += $zero_rated_amt2;
+						$tot_taxable_purchase_amt2 += $taxable_purchase_amt2;
+						$tot_purch_services_amt2 += $purch_services_amt2;
+						$tot_purch_capital_goods_amt2 += $purch_capital_goods_amt2;
+						$tot_purch_goods_other_than_capital_goods2 += $purch_goods_other_than_capital_goods2;
+						$tot_input_tax_amt2 += $input_tax_amt2;
+						$tot_gross_taxable_purch_amt2 += $gross_taxable_purch_amt2;
+						
+					}
+					
+					alt_table_row_color($k);
+					label_cell('     <b>TOTAL</b>', 'colspan = 4 align="right"');
+					amount_cell($tot_gross_purchase2, true);
+					amount_cell($tot_purchase_non_vat_amt2, true);
+					amount_cell($tot_zero_rated_amt2, true);
+					amount_cell($tot_taxable_purchase_amt2, true);
+					amount_cell($tot_purch_services_amt2, true);
+					amount_cell($tot_purch_capital_goods_amt2, true);
+					amount_cell($tot_purch_goods_other_than_capital_goods2, true);
+					amount_cell($tot_input_tax_amt2, true);
+					amount_cell($tot_gross_taxable_purch_amt2, true);
+					end_row();
+					
+					/* GRAND TOTAL */
+					alt_table_row_color($k);
+					label_cell('     <b> GRAND TOTAL</b>', 'colspan = 4 align="right"');
+					amount_cell(($tot_gross_purchase + $tot_gross_purchase2), true);
+					amount_cell(($tot_purchase_non_vat_amt + $tot_purchase_non_vat_amt2), true);
+					amount_cell(($tot_zero_rated_amt + $tot_zero_rated_amt2), true);
+					amount_cell(($tot_taxable_purchase_amt + $tot_taxable_purchase_amt2), true);
+					amount_cell(($tot_purch_services_amt + $tot_purch_services_amt2), true);
+					amount_cell(($tot_purch_capital_goods_amt + $tot_purch_capital_goods_amt2), true);
+					amount_cell(($tot_purch_goods_other_than_capital_goods + $tot_purch_goods_other_than_capital_goods2), true);
+					amount_cell(($tot_input_tax_amt + $tot_input_tax_amt2), true);
+					amount_cell(($tot_gross_taxable_purch_amt + $tot_gross_taxable_purch_amt2), true);
+					end_row();
+					
+				end_table(1);
+				
+				
+		}	
+		
+	div_end();
+	
+end_form();
+
+end_page();
+
+?>

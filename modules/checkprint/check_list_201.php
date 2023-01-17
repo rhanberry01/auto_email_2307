@@ -1,0 +1,2593 @@
+<?php
+ini_set('mssql.connect_timeout',0);
+ini_set('mssql.timeout',0);
+set_time_limit(0);
+
+$page_security='SA_CHECKPRINT';
+$path_to_root="../..";
+include($path_to_root . "/includes/session.inc");
+add_access_extensions();
+
+include($path_to_root . "/purchasing/includes/purchasing_ui.inc");
+include($path_to_root . "/modules/checkprint/includes/check_accounts_db.inc");
+//include_once($path_to_root . "/reporting/includes/reporting.inc");
+include($path_to_root . "/modules/checkprint/includes/check_pdf.inc");
+include_once($path_to_root . "/modules/checkprint/includes/cv_mailer.inc");
+
+unset($_SESSION['cv_to_process']);
+
+
+
+//------------------------------------------------------------------------------------------------
+
+
+function create_check_info($receipt,$cv_header)
+{
+	$pay_to = $receipt['pay_to'];
+	
+	if ($pay_to == '')
+	{
+		$pay_to = preg_replace("/\([^)]+\)/","",$to);
+	}
+	
+	$pay_to = html_entity_decode($pay_to);
+	
+	$sampleamount = number_format($receipt['chk_amount'], 2, '', '');
+	
+	$date__ = explode_date_to_dmy(sql2date($receipt['chk_date']));
+	
+	$Prefix = 'C';
+	$Vendor_Code = str_pad($receipt["person_id"], 10);
+	$Payee_Name = str_pad($pay_to, 50);
+	$Check_Amount = str_pad($sampleamount, 15, "0", STR_PAD_LEFT);
+	$Check_Date = $date__[1].$date__[0].$date__[2];
+	$TIN = 'X1';
+	$Purpose_of_Check = '';
+	$Buffer = '';
+	
+	return $Prefix.$Vendor_Code.$Payee_Name.$Check_Amount.$Check_Date.$TIN.$Purpose_of_Check.$Buffer.PHP_EOL;
+}
+
+/**
+	jade added
+	@param person_id int
+*/
+function getCvDate($person_id){
+// 	$sql   = "SELECT a.cv_date, a.amount FROM 0_cv_header a INNER JOIN 0_cv_details b ON a.id = b.cv_id
+// 			 -- INNER JOIN 0_supp_trans c ON b.trans_no = c.trans_no
+// 			 WHERE person_id = ".$person_id." AND a.cv_date  ORDER BY a.cv_date DESC LIMIT 1";
+// 	$query = db_query($sql , "error");
+// 	$row   = db_fetch($query);
+// 	$data = array();
+// 	array_push($data, sql2date($row['cv_date']));
+// 	array_push($data, $row['amount']);
+// 	return $data;
+	
+	$sql   = "SELECT a.cv_date, a.amount FROM 0_cv_header a INNER JOIN 0_cv_details b ON a.id = b.cv_id
+			 -- INNER JOIN 0_supp_trans c ON b.trans_no = c.trans_no
+			 WHERE person_id = ".$person_id." AND a.cv_date  ORDER BY a.cv_date DESC LIMIT 1";
+	$query = db_query($sql , "error");
+	$row   = db_fetch($query);
+	$data = array();
+	array_push($data, sql2date($row['cv_date']));
+	array_push($data, $row['amount']);
+	return $data;
+}
+
+function create_check_voucher_info($receipt, $cv_header, &$amount)
+{
+	global $systypes_array_short;
+	// get voucer details
+	$res = get_cv_details($cv_header['id']," AND trans_type != '22' AND voided = 0 ORDER BY amount DESC");
+	
+	$return = '';
+	while ($cv_d_row = db_fetch($res))
+	{
+		$tran_det = get_tran_details($cv_d_row['trans_type'], $cv_d_row['trans_no']);
+		
+		$ref = $systypes_array_short[$cv_d_row['trans_type']]. '#'.$tran_det['reference'];
+		$inv_no = '';
+		
+		if ($tran_det['supp_reference'] != '' AND $cv_d_row['trans_type'] == 20)
+			$inv_no = 'SI#'.$tran_det['supp_reference'];
+			
+		$tran_date = explode_date_to_dmy(
+			sql2date(($cv_d_row['trans_type'] != 20 ? $tran_det['tran_date'] : $tran_det['del_date'])));
+		
+		$amt_paid = '0';
+		if ($cv_d_row['amount'] > 0)
+		{
+			$amt_paid = number_format($amount, 2, '', '');
+			$amount -= round2($cv_d_row['amount'],2);
+		}
+		
+		$inv_amount = number_format($cv_d_row['amount'], 2, '', '');
+		
+		$reference = str_pad($ref, 16);
+		$cv_no = str_pad($cv_header['cv_no'], 15);
+		$inv_no = str_pad($inv_no, 15);
+		$inv_date = $tran_date[1].$tran_date[0].$tran_date[2];
+		$inv_amount = str_pad($inv_amount, 21, "0", STR_PAD_LEFT);
+		$dmcm_amount = str_pad('0', 21, "0", STR_PAD_LEFT);
+		$tax_amount = str_pad('0', 21, "0", STR_PAD_LEFT);
+		$amount_paid = str_pad($amt_paid, 21, "0", STR_PAD_LEFT); // compute positive - negative
+		$Buffer = '';
+		
+		$return .= 'V'.$reference.$cv_no.$inv_no.$inv_date.$inv_amount.$dmcm_amount.$tax_amount.$amount_paid.$Buffer.PHP_EOL;
+	}
+	
+	return $return;
+}
+
+// if ($_POST['print_checks'] OR  $_POST['print_checks_metrobank'])
+// {
+	// $prefix = 'chk_prnt';
+	// $ids = array();
+	// foreach($_POST as $postkey=>$postval)
+    // {
+		// if (strpos($postkey, $prefix) === 0)
+		// {
+			// $id = substr($postkey, strlen($prefix));
+			// $ids[] = $id;
+		// }
+	// }
+	
+	// if (count($ids) == 0)
+	// {
+		// display_error('No Selected Check/s!');
+		// return false;
+	// }
+	
+	// else
+	// {	
+		// sort($ids);
+		// // meta_forward($path_to_root . "/modules/checkprint/real_check_print.php",'ids='.implode(',',$ids));
+		
+		// if ($_POST['print_checks'])
+			// echo "<script type='text/javascript'>
+				// window.open('".$path_to_root . "/modules/checkprint/aub_check_export.php?ids=".implode(',',$ids)."',
+				// '_blank','width=400px,height=300px,scrollbars=0,resizable=no')
+				// </script>";
+		// else if ($_POST['print_checks_metrobank'])
+		// {
+			// $sql = "SELECT * FROM ".TB_PREF."mb_ccws WHERE batch_no = ".$_POST['mb_batch_no'];
+			// $res = db_query($sql);
+			
+			// if (db_num_rows($res) > 0)
+			// {
+				// display_error('Batch Number is already used');
+				// unset($_POST['print_checks_metrobank']);
+			// }
+			// if (isset($_POST['print_checks_metrobank']))
+			// {
+				// $sql = "INSERT INTO ".TB_PREF."mb_ccws(batch_no,transaction_date,user_id)
+						// VALUES(".$_POST['mb_batch_no'].",'".date2sql($_POST['transaction_date'])."',
+							// ".$_SESSION['wa_current_user']->user.")";
+				// db_query($sql,'failed to insert CCWS batch');
+				
+				// $sql = "UPDATE ".TB_PREF."cv_header SET
+							// check_printed = 1
+						// WHERE bank_trans_id IN (".implode(',',$ids).")
+						// AND bank_trans_id != 0";
+				// db_query($sql,'failed to flag check as printed');
+				
+				// ob_end_clean();
+				// ob_start();
+				
+				// $batch_no = substr('00'.$_POST['mb_batch_no'], -2);
+				// $tran_date_ = explode_date_to_dmy($_POST['transaction_date']);
+				// $tran_date = $tran_date_[1].$tran_date_[0].$tran_date_[2];
+				
+				// echo "MBTC-CCWS". "$tran_date-$batch_no" . PHP_EOL;
+				// // display_error($ids[0]);
+				
+				// $res = get_c_details(implode(',',$ids));
+				// // display_error(db_num_rows($res));
+				// while($receipt = db_fetch($res))
+				// {	
+					// $c_amt_ = $receipt['chk_amount'];
+					// $cv_header = get_cv_header_by_bank_trans_id($receipt['bank_trans_id']);
+					// echo create_check_info($receipt,$cv_header);
+					// echo create_check_voucher_info($receipt,$cv_header,$c_amt_);
+				// }
+				
+				// $output = ob_get_clean();
+
+				// header('Content-disposition: attachment; filename=CCWS_'.$batch_no.'.txt');
+				// header('Content-type: text/plain');
+
+				// echo $output;
+				// exit();
+			// }
+		// }
+	// }
+	
+// }
+//------------------------------------------------------------------------------------------------
+
+$js = "";
+if ($use_popup_windows)
+	$js .= get_js_open_window(900, 500);
+if ($use_date_picker)
+	$js .= get_js_date_picker();
+
+$js .= "
+	function openThickBox(id, typex,txt){
+		// if(type == 25){
+		// 	ttype = 5;
+		// }else if(type == 20){
+		// 	ttype = 6;
+		// }
+		url = '../../sales/customer_del_so.php?OrderNumber=' + id + '&view=1&type=' + typex + '&KeepThis=true&TB_iframe=true&height=280&width=300';
+		tb_show('Void '+txt, url);
+	}
+";	
+	
+page(_("Process Payment"), false, false, "", $js);
+
+
+if (isset($_GET['FromDate'])){
+	$_POST['TransAfterDate'] = $_GET['FromDate'];
+}
+if (isset($_GET['ToDate'])){
+	$_POST['TransToDate'] = $_GET['ToDate'];
+}
+
+if (isset($_GET['batchpaymentid']))
+{
+	$csv_id = $_GET['batchpaymentid'];
+	$sql = "SELECT * FROM ".TB_PREF."csv WHERE id = $csv_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	display_notification_centered("Batch Payment # $csv_id created");
+	
+	foreach($_SESSION['email_msgs'] as $msg)
+		display_notification_centered($msg);
+		
+
+    // display_note(get_gl_view_str($trans_type, $trans_no, _("&View this Journal Entry")));
+	// hyperlink_no_params($path_to_root.'/csv/'.$row['csv_file'], '<b>Download CSV File (<i>right click then select Save As...</i>)</b>');
+	
+	$target = $path_to_root.'/modules/checkprint/csv_download.php?id='.$csv_id;
+	echo  "<center><a href='$target' id='$csv_id' onclick=\"javascript:openWindow(this.href,this.target); 
+		return false;\"><b>Download CSV File</b></a></center>";
+		
+	reset_focus();
+	hyperlink_no_params($path_to_root."/modules/checkprint/check_list_201.php", _("Return to Check Vouchers Page"));
+
+	display_footer_exit();
+}
+else if (isset($_GET['pbcombatchpaymentid']))
+{
+	$csv_id = $_GET['pbcombatchpaymentid'];
+	$sql = "SELECT * FROM ".TB_PREF."csv_pbcom WHERE id = $csv_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	display_notification_centered("Batch Payment # $csv_id created");
+	
+	foreach($_SESSION['email_msgs'] as $msg)
+		display_notification_centered($msg);
+		
+
+    // display_note(get_gl_view_str($trans_type, $trans_no, _("&View this Journal Entry")));
+	// hyperlink_no_params($path_to_root.'/csv/'.$row['csv_file'], '<b>Download CSV File (<i>right click then select Save As...</i>)</b>');
+	
+	$target = $path_to_root.'/modules/checkprint/csv_download_pbcom2.php?id='.$csv_id;
+	echo  "<center><a href='$target' id='$csv_id' onclick=\"javascript:openWindow(this.href,this.target); 
+		return false;\"><b>Download CSV File</b></a></center>";
+		
+	reset_focus();
+	hyperlink_no_params($path_to_root."/modules/checkprint/check_list_201.php", _("Return to Check Vouchers Page"));
+
+	display_footer_exit();
+}
+else if (isset($_GET['pbcomacabatchpaymentid']))
+{
+	$csv_id = $_GET['pbcomacabatchpaymentid'];
+	$sql = "SELECT * FROM ".TB_PREF."csv_pbcom_aca WHERE id = $csv_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	display_notification_centered("Batch Payment # $csv_id created");
+	
+	foreach($_SESSION['email_msgs'] as $msg)
+		display_notification_centered($msg);
+		
+
+    // display_note(get_gl_view_str($trans_type, $trans_no, _("&View this Journal Entry")));
+	// hyperlink_no_params($path_to_root.'/csv/'.$row['csv_file'], '<b>Download CSV File (<i>right click then select Save As...</i>)</b>');
+	
+	$target = $path_to_root.'/modules/checkprint/csv_download_pbcom3.php?id='.$csv_id;
+	echo  "<center><a href='$target' id='$csv_id' onclick=\"javascript:openWindow(this.href,this.target); 
+		return false;\"><b>Download CSV File</b></a></center>";
+		
+	reset_focus();
+	hyperlink_no_params($path_to_root."/modules/checkprint/check_list_201.php", _("Return to Check Vouchers Page"));
+
+	display_footer_exit();
+}
+else
+	unset($_SESSION['email_msgs']);
+//------------------------------------------------------------------------------------------------
+
+function for_pbcom_payment_update($id,$tag)
+{
+	$sql = "UPDATE ".TB_PREF."cv_header SET online_check_payment = $tag
+				WHERE id = $id";
+	db_query($sql,'failed to update CV for online payment');
+}
+
+function for_pbcomaca_payment_update($id,$tag)
+{
+	$sql = "UPDATE ".TB_PREF."cv_header SET online_aca_payment = $tag
+				WHERE id = $id";
+	db_query($sql,'failed to update CV for online payment');
+}
+
+function for_online_payment_update($id,$tag)
+{
+	$sql = "UPDATE ".TB_PREF."cv_header SET online_payment = $tag
+				WHERE id = $id";
+	db_query($sql,'failed to update CV for online payment');
+}
+
+function cv_due_date_update($id,$due_date)
+{
+	$sql = "UPDATE ".TB_PREF."cv_header SET due_date = '".date2sql($due_date)."'
+				WHERE id = $id";
+	db_query($sql,'failed to update CV due date');
+}
+
+function show_check_details($bank_trans_id)
+{
+	$sql = "SELECT * FROM ".TB_PREF."cheque_details
+			WHERE bank_trans_id = $bank_trans_id";
+	$res = db_query($sql);
+	$row = db_fetch($res);
+	
+	return $row['bank']." - ".$row['chk_number'].'&nbsp;';
+}
+
+function get_gl_trade_and_non_trade_total($cv_id)
+{
+	$company_pref = get_company_prefs();
+	$company_pref["creditors_act"];
+	$company_pref["creditors_act_nt"];
+	
+	$trans_in_cv_res = get_cv_details($cv_id);
+	$apv_trade = $apv_non_trade = 0;
+	
+	while ($cv_trans_row = db_fetch($trans_in_cv_res))
+	{
+		$apv_trade += get_gl_trans_amount($cv_trans_row['trans_type'], $cv_trans_row['trans_no'], $company_pref["creditors_act"]);
+		$apv_non_trade += get_gl_trans_amount($cv_trans_row['trans_type'], $cv_trans_row['trans_no'], $company_pref["creditors_act_nt"]);
+	}
+	
+	// display_error($apv_trade);
+	return array(-$apv_trade,-$apv_non_trade);
+}
+
+
+function process_pbcom_payment($id, $company_pref)
+{
+	
+	$cv_header = get_cv_header($id);
+	
+	$supplier_id = $cv_header['person_id'];
+	
+	$supp_currency = get_supplier_currency($supplier_id);
+	$bank_currency = get_bank_account_currency($company_pref['pbcom_payment_bank_id']);
+	$comp_currency = get_company_currency();
+	
+	if ($comp_currency != $bank_currency && $bank_currency != $supp_currency)
+		$rate = 0;
+	else
+		$rate = input_num('_ex_rate');
+
+	new_doc_date(Today());
+	
+	//============================================================================================
+	global $Refs;
+	
+	$date_ = Today();
+	$bank_account = $company_pref['pbcom_payment_bank_id'];
+	$amount = $cv_header['amount'];
+	$discount = 0;
+	$ref = $cv_header['cv_no'];
+	$memo_ = '';
+	$charge = 0;
+	//$ewt = $cv_header['ewt'];
+	$ewt = 0;
+	
+   	$supplier_currency = get_supplier_currency($supplier_id);
+    $bank_account_currency = get_bank_account_currency($bank_account);
+	$bank_gl_account = get_bank_gl_account($bank_account);
+
+	if ($rate == 0)
+	{
+		$supp_amount = exchange_from_to($amount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_discount = exchange_from_to($discount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_charge = exchange_from_to($charge, $bank_account_currency, $supplier_currency, $date_);
+	}
+	else
+	{
+		$supp_amount = round($amount / $rate, user_price_dec());
+		$supp_discount = round($discount / $rate, user_price_dec());
+		$supp_charge = round($charge / $rate, user_price_dec());
+	}
+	
+
+	// it's a supplier payment
+	$trans_type = ST_SUPPAYMENT;
+
+	/* Create a supp_trans entry for the supplier payment */
+	$payment_id = add_supp_trans($trans_type, $supplier_id, $date_, Today(),
+		$ref, "", -$supp_amount, 0, -$supp_discount, "", $rate, -$ewt);
+	
+	$total = 0;
+	$supplier_accounts = get_supplier_accounts($supplier_id);
+	
+	$t_nt_total = get_gl_trade_and_non_trade_total($cv_header['id']);
+			
+			if ($t_nt_total[0] != 0) // trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act"], 0, 0,
+						$t_nt_total[0], $supplier_id, "", $rate);
+					
+			if ($t_nt_total[1] != 0) // non trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act_nt"], 0, 0,
+						$t_nt_total[1], $supplier_id, "", $rate);
+			//============================
+			
+	// $total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $company_pref["creditors_act"], 0, 0,
+		// $ewt + $supp_amount + $supp_discount, $supplier_id, "", $rate);
+
+	if ($ewt != 0)
+	{
+		$ewt_act = get_company_pref('default_purchase_ewt_act');
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $ewt_act, 0, 0,
+			-$ewt, $supplier_id, "", $rate);
+	}
+	
+	if ($supp_charge != 0)
+	{
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+				-($supp_charge), $supplier_id, "", $rate);
+				
+		add_bank_trans($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($supp_charge), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,
+		"Could not add the supplier payment bank transaction");
+	}
+
+	$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+		-($amount), $supplier_id, "", $rate);
+	
+	/*now enter the bank_trans entry */
+	$bank_trans_id = add_bank_trans_2($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($amount), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,"Could not add the supplier payment bank transaction");
+
+	/*Post a balance post if $total != 0 */
+	add_gl_balance($trans_type, $payment_id, $date_, -$total, PT_SUPPLIER, $supplier_id);	
+	//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\
+
+	add_comments($trans_type, $payment_id, $date_, $memo_);
+
+	$Refs->save($trans_type, $payment_id, $ref);
+	
+	insert_cv_details($id, $trans_type, $payment_id, -$amount);
+	
+	//******************************************************************** allocation
+	$negative_cv_res =  get_cv_details($id,' AND amount<0 ORDER BY amount');
+	
+	$negatives = array();
+	while($row = db_fetch($negative_cv_res))
+	{
+		$negatives[] = array($row['trans_type'],$row['trans_no'],-$row['amount']);
+	}
+	
+	$positive_cv_res =  get_cv_details($id,' AND amount>0 ORDER BY amount DESC');
+	$positives = array();
+	
+	while($row = db_fetch($positive_cv_res))
+	{
+		$positives[] = array($row['trans_type'],$row['trans_no'],$row['amount']);
+	}
+	
+	$index = 0;
+	
+	foreach($negatives as $ind => $to_allocate)
+	{
+		$to_allocate_amount = round2($to_allocate[2],2); //total amount of the negative transaction
+		$current_allocated = 0;
+		
+		while(round2($to_allocate_amount,2) != round2(0,2))
+		{
+			// display_error($index);
+			// display_error($to_allocate_amount);
+			$index_add = false;
+			if ($allocatable == 0)
+				$allocatable = round2($positives[$index][2],2); //total amount of the positive transaction
+			
+			if (round($to_allocate_amount,2) == 0)
+				break;
+			
+			if ($to_allocate_amount < $allocatable)
+			{
+				$current_allocated = $to_allocate_amount ;
+			}
+			else
+			{
+				$current_allocated = $allocatable;
+				$index_add = true;
+			}
+			
+			add_supp_allocation($current_allocated,$to_allocate[0], $to_allocate[1],
+			    	 	$positives[$index][0], $positives[$index][1], $date_);
+						
+			update_supp_trans_allocation($positives[$index][0], $positives[$index][1], $current_allocated);		
+			
+			$to_allocate_amount -= round2($current_allocated,2);
+			$allocatable -= $current_allocated;
+		
+			if ($index_add)
+			{
+				$index ++;
+				// $allocatable = $positives[$index][2]; //total amount of the positive transaction
+			}
+		}
+		
+		update_supp_trans_allocation($to_allocate[0], $to_allocate[1], $to_allocate[2]);	
+	}
+	
+	$sql = "UPDATE ".TB_PREF."cv_header SET 
+					bank_trans_id='".$bank_trans_id."', 
+					online_check_payment = 2 
+				WHERE id = ". $id;
+	db_query($sql,'failed to update cv header for bank id');
+	
+	$sql1 = "UPDATE ".TB_PREF."supp_trans SET 
+					bank_trans_id='".$bank_trans_id."'
+				WHERE cv_id = ". $id;
+	db_query($sql1,'failed to update supp_trans header for bank id');
+	
+	return true;
+}
+
+
+function process_pbcomaca_payment($id, $company_pref)
+{
+	
+	$cv_header = get_cv_header($id);
+	
+	$supplier_id = $cv_header['person_id'];
+	
+	$supp_currency = get_supplier_currency($supplier_id);
+	$bank_currency = get_bank_account_currency($company_pref['pbcom_payment_bank_id']);
+	$comp_currency = get_company_currency();
+	
+	if ($comp_currency != $bank_currency && $bank_currency != $supp_currency)
+		$rate = 0;
+	else
+		$rate = input_num('_ex_rate');
+
+	new_doc_date(Today());
+	
+	//============================================================================================
+	global $Refs;
+	
+	$date_ = Today();
+	$bank_account = $company_pref['pbcom_payment_bank_id'];
+	$amount = $cv_header['amount'];
+	$discount = 0;
+	$ref = $cv_header['cv_no'];
+	$memo_ = '';
+	$charge = 0;
+	//$ewt = $cv_header['ewt'];
+	$ewt = 0;
+	
+   	$supplier_currency = get_supplier_currency($supplier_id);
+    $bank_account_currency = get_bank_account_currency($bank_account);
+	$bank_gl_account = get_bank_gl_account($bank_account);
+
+	if ($rate == 0)
+	{
+		$supp_amount = exchange_from_to($amount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_discount = exchange_from_to($discount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_charge = exchange_from_to($charge, $bank_account_currency, $supplier_currency, $date_);
+	}
+	else
+	{
+		$supp_amount = round($amount / $rate, user_price_dec());
+		$supp_discount = round($discount / $rate, user_price_dec());
+		$supp_charge = round($charge / $rate, user_price_dec());
+	}
+	
+
+	// it's a supplier payment
+	$trans_type = ST_SUPPAYMENT;
+
+	/* Create a supp_trans entry for the supplier payment */
+	$payment_id = add_supp_trans($trans_type, $supplier_id, $date_, Today(),
+		$ref, "", -$supp_amount, 0, -$supp_discount, "", $rate, -$ewt);
+	
+	$total = 0;
+	$supplier_accounts = get_supplier_accounts($supplier_id);
+	
+	$t_nt_total = get_gl_trade_and_non_trade_total($cv_header['id']);
+			
+			if ($t_nt_total[0] != 0) // trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act"], 0, 0,
+						$t_nt_total[0], $supplier_id, "", $rate);
+					
+			if ($t_nt_total[1] != 0) // non trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act_nt"], 0, 0,
+						$t_nt_total[1], $supplier_id, "", $rate);
+			//============================
+			
+	// $total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $company_pref["creditors_act"], 0, 0,
+		// $ewt + $supp_amount + $supp_discount, $supplier_id, "", $rate);
+
+	if ($ewt != 0)
+	{
+		$ewt_act = get_company_pref('default_purchase_ewt_act');
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $ewt_act, 0, 0,
+			-$ewt, $supplier_id, "", $rate);
+	}
+	
+	if ($supp_charge != 0)
+	{
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+				-($supp_charge), $supplier_id, "", $rate);
+				
+		add_bank_trans($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($supp_charge), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,
+		"Could not add the supplier payment bank transaction");
+	}
+
+	$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+		-($amount), $supplier_id, "", $rate);
+	
+	/*now enter the bank_trans entry */
+	$bank_trans_id = add_bank_trans_2($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($amount), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,"Could not add the supplier payment bank transaction");
+
+	/*Post a balance post if $total != 0 */
+	add_gl_balance($trans_type, $payment_id, $date_, -$total, PT_SUPPLIER, $supplier_id);	
+	//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\
+
+	add_comments($trans_type, $payment_id, $date_, $memo_);
+
+	$Refs->save($trans_type, $payment_id, $ref);
+	
+	insert_cv_details($id, $trans_type, $payment_id, -$amount);
+	
+	//******************************************************************** allocation
+	$negative_cv_res =  get_cv_details($id,' AND amount<0 ORDER BY amount');
+	
+	$negatives = array();
+	while($row = db_fetch($negative_cv_res))
+	{
+		$negatives[] = array($row['trans_type'],$row['trans_no'],-$row['amount']);
+	}
+	
+	$positive_cv_res =  get_cv_details($id,' AND amount>0 ORDER BY amount DESC');
+	$positives = array();
+	
+	while($row = db_fetch($positive_cv_res))
+	{
+		$positives[] = array($row['trans_type'],$row['trans_no'],$row['amount']);
+	}
+	
+	$index = 0;
+	
+	foreach($negatives as $ind => $to_allocate)
+	{
+		$to_allocate_amount = round2($to_allocate[2],2); //total amount of the negative transaction
+		$current_allocated = 0;
+		
+		while(round2($to_allocate_amount,2) != round2(0,2))
+		{
+			// display_error($index);
+			// display_error($to_allocate_amount);
+			$index_add = false;
+			if ($allocatable == 0)
+				$allocatable = round2($positives[$index][2],2); //total amount of the positive transaction
+			
+			if (round($to_allocate_amount,2) == 0)
+				break;
+			
+			if ($to_allocate_amount < $allocatable)
+			{
+				$current_allocated = $to_allocate_amount ;
+			}
+			else
+			{
+				$current_allocated = $allocatable;
+				$index_add = true;
+			}
+			
+			add_supp_allocation($current_allocated,$to_allocate[0], $to_allocate[1],
+			    	 	$positives[$index][0], $positives[$index][1], $date_);
+						
+			update_supp_trans_allocation($positives[$index][0], $positives[$index][1], $current_allocated);		
+			
+			$to_allocate_amount -= round2($current_allocated,2);
+			$allocatable -= $current_allocated;
+		
+			if ($index_add)
+			{
+				$index ++;
+				// $allocatable = $positives[$index][2]; //total amount of the positive transaction
+			}
+		}
+		
+		update_supp_trans_allocation($to_allocate[0], $to_allocate[1], $to_allocate[2]);	
+	}
+	
+	$sql = "UPDATE ".TB_PREF."cv_header SET 
+					bank_trans_id='".$bank_trans_id."', 
+					online_aca_payment = 2
+				WHERE id = ". $id;
+	db_query($sql,'failed to update cv header for bank id');
+	
+	$sql1 = "UPDATE ".TB_PREF."supp_trans SET 
+					bank_trans_id='".$bank_trans_id."'
+				WHERE cv_id = ". $id;
+	db_query($sql1,'failed to update supp_trans header for bank id');
+	
+	return true;
+}
+//------------------------------------------------------------------------------------------------
+function process_online_payment($id, $company_pref)
+{
+	
+	$cv_header = get_cv_header($id);
+	
+	$supplier_id = $cv_header['person_id'];
+	
+	$supp_currency = get_supplier_currency($supplier_id);
+	$bank_currency = get_bank_account_currency($company_pref['online_payment_bank_id']);
+	$comp_currency = get_company_currency();
+	
+	if ($comp_currency != $bank_currency && $bank_currency != $supp_currency)
+		$rate = 0;
+	else
+		$rate = input_num('_ex_rate');
+
+	new_doc_date(Today());
+	
+	//============================================================================================
+	global $Refs;
+	
+	$date_ = Today();
+	$bank_account = $company_pref['online_payment_bank_id'];
+	$amount = $cv_header['amount'];
+	$discount = 0;
+	$ref = $cv_header['cv_no'];
+	$memo_ = '';
+	$charge = 0;
+	//$ewt = $cv_header['ewt'];
+	$ewt = 0;
+	
+   	$supplier_currency = get_supplier_currency($supplier_id);
+    $bank_account_currency = get_bank_account_currency($bank_account);
+	$bank_gl_account = get_bank_gl_account($bank_account);
+
+	if ($rate == 0)
+	{
+		$supp_amount = exchange_from_to($amount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_discount = exchange_from_to($discount, $bank_account_currency, $supplier_currency, $date_);
+		$supp_charge = exchange_from_to($charge, $bank_account_currency, $supplier_currency, $date_);
+	}
+	else
+	{
+		$supp_amount = round($amount / $rate, user_price_dec());
+		$supp_discount = round($discount / $rate, user_price_dec());
+		$supp_charge = round($charge / $rate, user_price_dec());
+	}
+	
+
+	// it's a supplier payment
+	$trans_type = ST_SUPPAYMENT;
+
+	/* Create a supp_trans entry for the supplier payment */
+	$payment_id = add_supp_trans($trans_type, $supplier_id, $date_, Today(),
+		$ref, "", -$supp_amount, 0, -$supp_discount, "", $rate, -$ewt);
+	
+	$total = 0;
+	$supplier_accounts = get_supplier_accounts($supplier_id);
+	
+	$t_nt_total = get_gl_trade_and_non_trade_total($cv_header['id']);
+			
+			if ($t_nt_total[0] != 0) // trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act"], 0, 0,
+						$t_nt_total[0], $supplier_id, "", $rate);
+					
+			if ($t_nt_total[1] != 0) // non trade
+				$total += add_gl_trans_supplier($trans_type, $payment_id, $date_, $company_pref["creditors_act_nt"], 0, 0,
+						$t_nt_total[1], $supplier_id, "", $rate);
+			//============================
+			
+	// $total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $company_pref["creditors_act"], 0, 0,
+		// $ewt + $supp_amount + $supp_discount, $supplier_id, "", $rate);
+
+	if ($ewt != 0)
+	{
+		$ewt_act = get_company_pref('default_purchase_ewt_act');
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $ewt_act, 0, 0,
+			-$ewt, $supplier_id, "", $rate);
+	}
+	
+	if ($supp_charge != 0)
+	{
+		$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+				-($supp_charge), $supplier_id, "", $rate);
+				
+		add_bank_trans($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($supp_charge), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,
+		"Could not add the supplier payment bank transaction");
+	}
+
+	$total += add_gl_trans_supplier($trans_type, $payment_id, Today(), $bank_gl_account, 0, 0,
+		-($amount), $supplier_id, "", $rate);
+	
+	/*now enter the bank_trans entry */
+	$bank_trans_id = add_bank_trans_2($trans_type, $payment_id, $bank_account, $ref,
+		Today(), -($amount), PT_SUPPLIER,
+		$supplier_id, $bank_account_currency,"Could not add the supplier payment bank transaction");
+
+	/*Post a balance post if $total != 0 */
+	add_gl_balance($trans_type, $payment_id, $date_, -$total, PT_SUPPLIER, $supplier_id);	
+	//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\\//\\
+
+	add_comments($trans_type, $payment_id, $date_, $memo_);
+
+	$Refs->save($trans_type, $payment_id, $ref);
+	
+	insert_cv_details($id, $trans_type, $payment_id, -$amount);
+	
+	//******************************************************************** allocation
+	$negative_cv_res =  get_cv_details($id,' AND amount<0 ORDER BY amount');
+	
+	$negatives = array();
+	while($row = db_fetch($negative_cv_res))
+	{
+		$negatives[] = array($row['trans_type'],$row['trans_no'],-$row['amount']);
+	}
+	
+	$positive_cv_res =  get_cv_details($id,' AND amount>0 ORDER BY amount DESC');
+	$positives = array();
+	
+	while($row = db_fetch($positive_cv_res))
+	{
+		$positives[] = array($row['trans_type'],$row['trans_no'],$row['amount']);
+	}
+	
+	$index = 0;
+	
+	foreach($negatives as $ind => $to_allocate)
+	{
+		$to_allocate_amount = round2($to_allocate[2],2); //total amount of the negative transaction
+		$current_allocated = 0;
+		
+		while(round2($to_allocate_amount,2) != round2(0,2))
+		{
+			// display_error($index);
+			// display_error($to_allocate_amount);
+			$index_add = false;
+			if ($allocatable == 0)
+				$allocatable = round2($positives[$index][2],2); //total amount of the positive transaction
+			
+			if (round($to_allocate_amount,2) == 0)
+				break;
+			
+			if ($to_allocate_amount < $allocatable)
+			{
+				$current_allocated = $to_allocate_amount ;
+			}
+			else
+			{
+				$current_allocated = $allocatable;
+				$index_add = true;
+			}
+			
+			add_supp_allocation($current_allocated,$to_allocate[0], $to_allocate[1],
+			    	 	$positives[$index][0], $positives[$index][1], $date_);
+						
+			update_supp_trans_allocation($positives[$index][0], $positives[$index][1], $current_allocated);		
+			
+			$to_allocate_amount -= round2($current_allocated,2);
+			$allocatable -= $current_allocated;
+		
+			if ($index_add)
+			{
+				$index ++;
+				// $allocatable = $positives[$index][2]; //total amount of the positive transaction
+			}
+		}
+		
+		update_supp_trans_allocation($to_allocate[0], $to_allocate[1], $to_allocate[2]);	
+	}
+	
+	$sql = "UPDATE ".TB_PREF."cv_header SET 
+					bank_trans_id='".$bank_trans_id."', 
+					online_payment = 2 
+				WHERE id = ". $id;
+	db_query($sql,'failed to update cv header for bank id');
+	
+	
+		$sql1 = "UPDATE ".TB_PREF."supp_trans SET 
+					bank_trans_id='".$bank_trans_id."'
+				WHERE cv_id = ". $id;
+	db_query($sql1,'failed to update supp_trans header for bank id');
+	
+	
+	return true;
+}
+
+
+if (isset($_POST['process_pbcom']))
+{
+	$co = get_company_prefs();
+	
+	if ($co['pbcom_payment_bank_id'] == '')
+	{
+		display_error('No bank defined for online payment. '. "<a href='$path_to_root/admin/gl_setup.php?p'><b>Set it here</b></a>");
+		unset($_POST['process_online']);
+	}
+}
+
+
+if (isset($_POST['process_pbcom']))
+{
+	global $db_connections;
+	
+	$co = get_company_prefs();
+	
+	$prefix = 'for_pb';
+	
+	begin_transaction();
+	
+	$count = 0;
+	$csv_details = array();
+
+	$billing_institution_code = '888888';
+	$subscriber_name = '';
+	$subscriber_number = '';
+	
+	
+	$list = array ();
+	$total=0;
+	$_SESSION['email_msgs'] = array();
+	$csv_id = 0;
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			
+			$i = process_pbcom_payment($id,$co);
+			
+			if ($i == true)
+			{
+				// bank_id for this part will be 2 for Metrobank
+				$srs_branch_id = $db_connections[$_SESSION["wa_current_user"]->company]["srs_branch_id"];
+				
+				$date_today = date2sql(Today());
+				$budget_sql = "SELECT id FROM srs_aria_budgeting.tbl_budget WHERE date_added = '$date_today' AND bank_id = 3";
+				$budget_query = db_query($budget_sql, 'failed to select budget');
+				$budget_result = db_fetch_assoc($budget_query);
+
+				if (!empty($budget_result)) {
+					$budget_id = $budget_result['id'];
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+				else {
+					$budget_sql = "INSERT INTO srs_aria_budgeting.tbl_budget (bank_id, amount, remarks, date_added) VALUES (3, 0, '', '$date_today')";
+					$budget_query = db_query($budget_sql, 'failed to insert budget for today!');
+					$budget_id = db_insert_id();
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+
+				if ($csv_id == 0)
+				{
+					$sql = "INSERT INTO ".TB_PREF."csv_pbcom (csv_file, bank_id) VALUES ('',".$co['pbcom_payment_bank_id'].")";
+					db_query($sql,'failed to insert csv header');
+					
+					$csv_id = db_insert_id();
+				}
+					
+				//$account_number=229100002636;
+				$account_number=251101001507;
+				$myBranchCode=$db_connections[$_SESSION["wa_current_user"]->company]["br_code"];
+					
+				$cv_header= get_cv_header($id);
+				$total += round2($cv_header['amount'],2);
+				
+				// $to = payment_person_name($cv_header['person_type'],$cv_header['person_id'], false);
+				$to = html_entity_decode(get_supplier_pay_to($cv_header['person_id']));
+				$supplier_row = get_supplier($cv_header['person_id']);
+				
+				
+				$to = str_replace(',', '', $to);
+				$subscriber_name = $to;
+		
+				$subscriber_number = $supplier_row['supp_ref'];
+				
+				//$supplier_row['gst_no'];
+		
+				$list[] = array('H', $account_number,Today(),0, $to, //preg_replace("/\([^)]+\)/","",$to),
+								number_format($cv_header['amount'],2,'.',''), $subscriber_name, $subscriber_number, 
+								'CV'.$cv_header['cv_no'],'','','','','','','','N','','','','999999999',begin_month(Today()),end_month(Today()),$myBranchCode.'-CV'.$cv_header['cv_no'],1,$supplier_row['email']);
+				$total += $cv_header['amount'];
+				
+				// $list[] = array('T', 'CV'.$cv_header['cv_no'],'WC 158',number_format($cv_header['amount'],2,'.',''), 0, //preg_replace("/\([^)]+\)/","",$to),
+								// 0, 0, '1% - PAYMENT BY SAN ROQUE SUPERMARKET RETAIL SYSTEMS INC TO SUPPLIER OF GOODS', 
+								// number_format($cv_header['amount']*.01,2,'.',''),$myBranchCode.'-CV'.$cv_header['cv_no']);
+				
+				$csv_details[] = $id;
+				$count ++;
+				
+				$_SESSION['email_msgs'][] = send_that_cv($cv_header['id'],$cv_header['bank_trans_id']);
+			}
+			
+		}
+    }
+	
+	if ($count == 0)
+	{	
+		cancel_transaction();
+		display_notification("No CV processed");
+	}
+	else
+	{	
+		
+		$connection = $db_connections[$_SESSION["wa_current_user"]->company];
+		list($day, $month, $year) = explode_date_to_dmy(Today());
+		
+		$file_name = $connection['srs_branch'].'-PBCOM_BatchPayment_'.$csv_id.'_-_'.$month.$day.$year.".csv";
+		
+		$sql = "UPDATE ".TB_PREF."csv_pbcom SET csv_file = ".db_escape($file_name)."WHERE id = $csv_id";
+		db_query($sql,'failed to update csv header');
+		
+		$list[] = array('S',$count,number_format($total,2,'.',''),$csv_id,'','','','','','','','','','','','','','','');
+	
+
+		$fp = fopen($path_to_root.'/csv/'.$file_name, 'w');
+
+		foreach ($list as $fields) {
+			fputcsv($fp, $fields);
+		}
+
+		fclose($fp);
+		$target = $path_to_root.'/csv/'.$file_name;
+		
+		foreach ($csv_details as $cv_id)
+		{
+			$sql = "INSERT INTO ".TB_PREF."csv_details_pbcom (csv_id, cv_id)
+						VALUES ($csv_id,$cv_id)";
+			db_query($sql,'failed to insert csv detail');
+		}
+		
+		
+		commit_transaction();
+		// cancel_transaction();
+		display_notification("Processed $count CV(s)");
+		meta_forward($_SERVER['PHP_SELF'], "pbcombatchpaymentid=$csv_id");
+	}
+	
+}
+
+
+
+if (isset($_POST['process_pbcomaca']))
+{
+	$co = get_company_prefs();
+	
+	if ($co['pbcom_payment_bank_id'] == '')
+	{
+		display_error('No bank defined for online payment. '. "<a href='$path_to_root/admin/gl_setup.php?p'><b>Set it here</b></a>");
+		unset($_POST['process_online']);
+	}
+}
+
+
+if (isset($_POST['process_pbcomaca']))
+{
+	global $db_connections;
+	
+	$co = get_company_prefs();
+	
+	$prefix = 'for_pbaca';
+	
+	begin_transaction();
+	
+	$count = 0;
+	$csv_details = array();
+
+	$billing_institution_code = '888888';
+	$subscriber_name = '';
+	$subscriber_number = '';
+	
+	
+	$list = array ();
+	$total=0;
+	$_SESSION['email_msgs'] = array();
+	$csv_id = 0;
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			
+			$i = process_pbcomaca_payment($id,$co);
+			
+			if ($i == true)
+			{
+				// bank_id for this part will be 2 for Metrobank
+				$srs_branch_id = $db_connections[$_SESSION["wa_current_user"]->company]["srs_branch_id"];
+				
+				$date_today = date2sql(Today());
+				$budget_sql = "SELECT id FROM srs_aria_budgeting.tbl_budget WHERE date_added = '$date_today' AND bank_id = 3";
+				$budget_query = db_query($budget_sql, 'failed to select budget');
+				$budget_result = db_fetch_assoc($budget_query);
+
+				if (!empty($budget_result)) {
+					$budget_id = $budget_result['id'];
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+				else {
+					$budget_sql = "INSERT INTO srs_aria_budgeting.tbl_budget (bank_id, amount, remarks, date_added) VALUES (3, 0, '', '$date_today')";
+					$budget_query = db_query($budget_sql, 'failed to insert budget for today!');
+					$budget_id = db_insert_id();
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+
+				if ($csv_id == 0)
+				{
+					$sql = "INSERT INTO ".TB_PREF."csv_pbcom_aca (csv_file, bank_id) VALUES ('',".$co['pbcom_payment_bank_id'].")";
+					db_query($sql,'failed to insert csv header');
+					
+					$csv_id = db_insert_id();
+				}
+					
+				//$account_number=229100002636;
+				$account_number=251101001507;
+				$myBranchCode=$db_connections[$_SESSION["wa_current_user"]->company]["br_code"];
+					
+				$cv_header= get_cv_header($id);
+				$total += round2($cv_header['amount'],2);
+				
+				// $to = payment_person_name($cv_header['person_type'],$cv_header['person_id'], false);
+				$to = html_entity_decode(get_supplier_pay_to($cv_header['person_id']));
+				$supplier_row = get_supplier($cv_header['person_id']);
+				
+				
+				$to = str_replace(',', '', $to);
+				$subscriber_name = $to;
+		
+				$subscriber_number = $supplier_row['billing_institution_code'];
+				
+				//$supplier_row['gst_no'];
+				$list[] = array($subscriber_number,number_format($cv_header['amount'],2,'.',''),'CV'.$cv_header['cv_no']);
+		
+				// $list[] = array('H', $account_number,Today(),0, $to, //preg_replace("/\([^)]+\)/","",$to),
+								// number_format($cv_header['amount'],2,'.',''), $subscriber_name, $subscriber_number, 
+								// 'CV'.$cv_header['cv_no'],'','','','','','','','N','','','','999999999',begin_month(Today()),end_month(Today()),$myBranchCode.'-CV'.$cv_header['cv_no'],1,$supplier_row['email']);
+				$total += $cv_header['amount'];
+				
+				// $list[] = array('T', 'CV'.$cv_header['cv_no'],'WC 158',number_format($cv_header['amount'],2,'.',''), 0, //preg_replace("/\([^)]+\)/","",$to),
+								// 0, 0, '1% - PAYMENT BY SAN ROQUE SUPERMARKET RETAIL SYSTEMS INC TO SUPPLIER OF GOODS', 
+								// number_format($cv_header['amount']*.01,2,'.',''),$myBranchCode.'-CV'.$cv_header['cv_no']);
+				
+				$csv_details[] = $id;
+				$count ++;
+				
+				$_SESSION['email_msgs'][] = send_that_cv($cv_header['id'],$cv_header['bank_trans_id']);
+			}
+			
+		}
+    }
+	
+	if ($count == 0)
+	{	
+		cancel_transaction();
+		display_notification("No CV processed");
+	}
+	else
+	{	
+		
+		$connection = $db_connections[$_SESSION["wa_current_user"]->company];
+		list($day, $month, $year) = explode_date_to_dmy(Today());
+		
+		$file_name = $connection['srs_branch'].'-PBCOMACA_BatchPayment_'.$csv_id.'_-_'.$month.$day.$year.".csv";
+		
+		$sql = "UPDATE ".TB_PREF."csv_pbcom_aca SET csv_file = ".db_escape($file_name)."WHERE id = $csv_id";
+		db_query($sql,'failed to update csv header');
+		
+		$list[] = array('S',$count,number_format($total,2,'.',''),$csv_id,'','','','','','','','','','','','','','','');
+	
+
+		$fp = fopen($path_to_root.'/csv/'.$file_name, 'w');
+
+		foreach ($list as $fields) {
+			fputcsv($fp, $fields);
+		}
+
+		fclose($fp);
+		$target = $path_to_root.'/csv/'.$file_name;
+		
+		foreach ($csv_details as $cv_id)
+		{
+			$sql = "INSERT INTO ".TB_PREF."csv_details_pbcom_aca (csv_id, cv_id)
+						VALUES ($csv_id,$cv_id)";
+			db_query($sql,'failed to insert csv detail');
+		}
+		
+		
+		commit_transaction();
+		// cancel_transaction();
+		display_notification("Processed $count CV(s)");
+		meta_forward($_SERVER['PHP_SELF'], "pbcomacabatchpaymentid=$csv_id");
+	}
+	
+}
+//------------------------------------------------------------------------------------------------
+
+if (isset($_POST['process_online']))
+{
+	$co = get_company_prefs();
+	
+	if ($co['online_payment_bank_id'] == '')
+	{
+		display_error('No bank defined for online payment. '. "<a href='$path_to_root/admin/gl_setup.php?p'><b>Set it here</b></a>");
+		unset($_POST['process_online']);
+	}
+}
+
+
+if (isset($_POST['process_online']))
+{
+	global $db_connections;
+	
+	$co = get_company_prefs();
+	
+	$prefix = 'for_op';
+	
+	begin_transaction();
+	
+	$count = 0;
+	$csv_details = array();
+
+	$billing_institution_code = '999999';
+	$subscriber_name = '';
+	$subscriber_number = '';
+	
+	
+	$list = array ();
+	$total=0;
+	$_SESSION['email_msgs'] = array();
+	$csv_id = 0;
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			
+			$i = process_online_payment($id,$co);
+			
+			if ($i == true)
+			{
+				// bank_id for this part will be 2 for Metrobank
+				$srs_branch_id = $db_connections[$_SESSION["wa_current_user"]->company]["srs_branch_id"];
+				
+				$date_today = date2sql(Today());
+				$budget_sql = "SELECT id FROM srs_aria_budgeting.tbl_budget WHERE date_added = '$date_today' AND bank_id = 2";
+				$budget_query = db_query($budget_sql, 'failed to select budget');
+				$budget_result = db_fetch_assoc($budget_query);
+
+				if (!empty($budget_result)) {
+					$budget_id = $budget_result['id'];
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+				else {
+					$budget_sql = "INSERT INTO srs_aria_budgeting.tbl_budget (bank_id, amount, remarks, date_added) VALUES (2, 0, '', '$date_today')";
+					$budget_query = db_query($budget_sql, 'failed to insert budget for today!');
+					$budget_id = db_insert_id();
+					$cv_insert_sql = "INSERT INTO srs_aria_budgeting.tbl_cv (budget_id, branch_id, cv_id, date_added, type, is_released, status) VALUES ($budget_id, $srs_branch_id, $id, '$date_today', 0, 1, 1)";
+					$cv_insert_query = db_query($cv_insert_sql, 'failed to insert cv into budget cv!');
+				}
+
+				if ($csv_id == 0)
+				{
+					$sql = "INSERT INTO ".TB_PREF."csv (csv_file, bank_id) VALUES ('',".$co['online_payment_bank_id'].")";
+					db_query($sql,'failed to insert csv header');
+					
+					$csv_id = db_insert_id();
+				}
+					
+				$cv_header= get_cv_header($id);
+				$total += round2($cv_header['amount'],2);
+				
+				// $to = payment_person_name($cv_header['person_type'],$cv_header['person_id'], false);
+				$to = html_entity_decode(get_supplier_pay_to($cv_header['person_id']));
+				$supplier_row = get_supplier($cv_header['person_id']);
+				
+				$subscriber_name = $to;
+				$subscriber_number = $supplier_row['supp_ref'];
+				$list[] = array('H', $supplier_row['billing_institution_code'], $to, //preg_replace("/\([^)]+\)/","",$to),
+										number_format($cv_header['amount'],2,'.',''), $subscriber_name, $subscriber_number, 
+										'CV'.$cv_header['cv_no'],'1','','','','','','','N','','','',$csv_id);
+				
+				$csv_details[] = $id;
+				$count ++;
+				
+				$_SESSION['email_msgs'][] = send_that_cv($cv_header['id'],$cv_header['bank_trans_id']);
+			}
+			
+		}
+    }
+	
+	if ($count == 0)
+	{	
+		cancel_transaction();
+		display_notification("No CV processed");
+	}
+	else
+	{	
+		
+		$connection = $db_connections[$_SESSION["wa_current_user"]->company];
+		list($day, $month, $year) = explode_date_to_dmy(Today());
+		
+		$file_name = $connection['srs_branch'].'-BatchPayment_'.$csv_id.'_-_'.$month.$day.$year.".csv";
+		
+		$sql = "UPDATE ".TB_PREF."csv SET csv_file = ".db_escape($file_name)."WHERE id = $csv_id";
+		db_query($sql,'failed to update csv header');
+		
+		$list[] = array('S',$count,number_format($total,2,'.',''),$csv_id,'','','','','','','','','','','','','','','');
+	
+
+		$fp = fopen($path_to_root.'/csv/'.$file_name, 'w');
+
+		foreach ($list as $fields) {
+			fputcsv($fp, $fields);
+		}
+
+		fclose($fp);
+	$target = $path_to_root.'/csv/'.$file_name;
+		
+		foreach ($csv_details as $cv_id)
+		{
+			$sql = "INSERT INTO ".TB_PREF."csv_details (csv_id, cv_id)
+						VALUES ($csv_id,$cv_id)";
+			db_query($sql,'failed to insert csv detail');
+		}
+		
+		
+		commit_transaction();
+		// cancel_transaction();
+		display_notification("Processed $count CV(s)");
+		meta_forward($_SERVER['PHP_SELF'], "batchpaymentid=$csv_id");
+	}
+	
+}
+
+$op_cvs = array();
+
+if (isset($_POST['show_total']))
+{
+	global $Ajax;
+	
+	$prefix = 'for_op';
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			$op_cvs[$id][0] = get_cv_view_str($id, $_POST['t_cv_no'.$id]);
+			$op_cvs[$id][1] = $_POST['t_cv_supp'.$id];
+			$op_cvs[$id][2] = $_POST['t_cv_amt'.$id];
+		}
+	}
+	
+	set_focus('show_total');
+	$Ajax->activate('total_table');
+}
+
+$pb_cvs = array();
+if (isset($_POST['show_pbcom_total']))
+{
+	global $Ajax;
+	
+	$prefix = 'for_pb';
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			$pb_cvs[$id][0] = get_cv_view_str($id, $_POST['t_cv_no'.$id]);
+			$pb_cvs[$id][1] = $_POST['t_cv_supp'.$id];
+			$pb_cvs[$id][2] = $_POST['t_cv_amt'.$id];
+		}
+	}
+	
+	set_focus('show_pbcom_total');
+	$Ajax->activate('total_table');
+}
+
+
+$pbaca_cvs = array();
+if (isset($_POST['show_pbcomaca_total']))
+{
+	global $Ajax;
+	
+	$prefix = 'for_pbaca';
+	
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			$pbaca_cvs[$id][0] = get_cv_view_str($id, $_POST['t_cv_no'.$id]);
+			$pbaca_cvs[$id][1] = $_POST['t_cv_supp'.$id];
+			$pbaca_cvs[$id][2] = $_POST['t_cv_amt'.$id];
+		}
+	}
+	
+	set_focus('show_pbcomaca_total');
+	$Ajax->activate('total_table');
+}
+
+
+function get_c_details($bank_trans_id)
+{
+	$sql = "SELECT a.person_type_id, a.person_id, b.*
+			FROM 0_bank_trans a, 0_cheque_details b 
+			WHERE a.id IN ($bank_trans_id)
+			AND a.id = b.bank_trans_id
+			ORDER BY chk_number";
+	$res = db_query($sql);
+	
+	return $res;
+}
+
+if (isset($_POST['print_cvs']))
+{
+	$prefix = 'batch_cv_print';
+	$ids = array();
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			$ids[] = $id;
+		}
+	}
+	
+	if (count($ids) == 0)
+	{
+		display_error('No Selected CV!');
+		return false;
+	}
+	
+	else
+	{	
+		sort($ids);
+		// meta_forward($path_to_root . "/modules/checkprint/real_check_print.php",'ids='.implode(',',$ids));
+		// meta_forward($path_to_root . "/modules/checkprint/cv_print.php",'cv_id='.implode(',',$ids));
+		echo "<script type='text/javascript'>
+				window.open('".$path_to_root . "/modules/checkprint/cv_print.php?",'cv_id='.implode(',',$ids)."',
+				'_blank','width=900px,height=600px,scrollbars=0,resizable=no')
+				</script>";
+	}
+	
+}
+
+if (isset($_POST['issue_checks']))
+{
+	$prefix = 'batch_check_issue';
+	$ids = array();
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			$ids[] = $id;
+		}
+	}
+	
+	if (count($ids) == 0)
+	{
+		display_error('No Selected CV to issue check!');
+		unset($_POST['issue_checks']);
+	}
+	else // CV's checked
+	{
+		sort($ids);
+		$_SESSION['cv_to_process'] = $ids;
+		meta_forward($path_to_root . "/modules/checkprint/check_issue_multiple.php",'New=Yes');
+		
+		// // meta_forward($path_to_root . "/modules/checkprint/cv_print.php",'cv_id='.implode(',',$ids));
+		// echo "<script type='text/javascript'>
+				// window.open('".$path_to_root . "/modules/checkprint/cv_print.php?",'cv_id='.implode(',',$ids)."',
+				// '_blank','width=400px,height=300px,scrollbars=0,resizable=no')
+			// </script>";	
+	}
+}
+
+//------------------------------------------------------------------------------------------------
+
+$approve_id = find_submit('approve_cv');
+if ($approve_id != -1)
+{
+	//approve CV
+	global $Ajax;
+	$sql = "UPDATE ".TB_PREF."cv_header SET approved = 1
+			WHERE id = $approve_id";
+	db_query($sql,'failed to approve CV');
+	
+	add_audit_trail(99, $approve_id, Today(), 'CV approved');
+	$Ajax->activate('trans_tbl');
+}
+
+$for_op_id = find_submit('_for_op');
+if ($for_op_id != -1)
+{
+	//tagging 
+	for_online_payment_update($for_op_id,check_value('for_op'.$for_op_id));
+	set_focus('for_op'.$for_op_id);
+}
+
+
+$for_pb_id = find_submit('_for_pb');
+if ($for_pb_id != -1)
+{
+	//tagging 
+	for_pbcom_payment_update($for_pb_id,check_value('for_pb'.$for_pb_id));
+	set_focus('for_pb'.$for_pb_id);
+}
+
+
+$for_pbaca_id = find_submit('_for_pbaca');
+if ($for_pbaca_id != -1)
+{
+	//tagging 
+	for_pbcomaca_payment_update($for_pbaca_id,check_value('for_pbaca'.$for_pbaca_id));
+	set_focus('for_pbaca'.$for_pbaca_id);
+}
+
+$check_all_op_id = find_submit('_check_all_op');
+if ($check_all_op_id != -1)
+{
+	global $Ajax;
+	//tagging 
+	
+	$prefix = 'for_check_all_op';
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			for_online_payment_update($id,check_value('check_all_op100'));
+		}
+	}
+	$Ajax->activate('trans_tbl');
+}
+
+$check_all_pb_id = find_submit('_check_all_pb');
+if ($check_all_pb_id != -1)
+{
+	global $Ajax;
+	//tagging 
+	
+	$prefix = 'for_check_all_pb';
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			for_pbcom_payment_update($id,check_value('check_all_pb100'));
+		}
+	}
+	$Ajax->activate('trans_tbl');
+}
+
+$check_all_pbaca_id = find_submit('_check_all_pbaca');
+if ($check_all_pbaca_id != -1)
+{
+	global $Ajax;
+	//tagging 
+	
+	$prefix = 'for_check_all_pbaca';
+	foreach($_POST as $postkey=>$postval)
+    {
+		if (strpos($postkey, $prefix) === 0)
+		{
+			$id = substr($postkey, strlen($prefix));
+			for_pbcomaca_payment_update($id,check_value('check_all_pbaca100'));
+		}
+	}
+	$Ajax->activate('trans_tbl');
+}
+
+
+
+if (list_updated('check_all_issue'))
+{
+	// display_error(check_value('check_all_issue'));
+	global $Ajax;
+	$Ajax->activate('trans_tbl');
+}
+
+$due_date_id = find_submit('_due_date_');
+if ($due_date_id != -1)
+{
+	cv_due_date_update($due_date_id,$_POST['due_date_'.$due_date_id]);
+}
+
+$email_id = find_submit('email');
+if ($email_id != -1)
+{
+	$r_ = get_cv_header($email_id);
+	if (!$r_['email_sent'])
+		send_that_cv($email_id,$r_['bank_trans_id']);
+	
+	unset($_POST['email'.$email_id]);
+}
+$reemailemail_id = find_submit('reemail');
+if ($reemailemail_id != -1)
+{
+	global $Ajax;
+	// $sql = "UPDATE ".TB_PREF."cv_header SET 
+				// email_sent = 0
+			// WHERE id=$reemailemail_id";
+	// db_query($sql,'failed to flag email_sent column to 0');
+	$r_ = get_cv_header($reemailemail_id);
+	// send_that_cv($reemailemail_id,$r_['bank_trans_id']);
+	$Ajax->activate('trans_tbl');
+}
+
+
+
+//------------------------------------------------------------------------------------------------
+
+start_form();
+
+// start_table("class='tablestyle_noborder'");
+// start_row();
+echo '<center>';
+$trans = array(
+		'-1' => 'Choose Trans Type',
+		'22' => 'Supplier Payment',
+		'20' => 'Supplier Invoice',
+		'52' => 'Supp Credit Memo',
+		'53' => 'Supp Debit Memo',
+	);
+// label_cells('Trans Type:',array_selector('trans_type', null, $trans));
+hidden('trans_type',-1);
+// ref_cells('Reference :', 'reference');
+ref_cells('CV # :', 'cv_no', null, null, null, true);
+supplier_list_cells('Supplier:', 'supplier_id', null, 'All Suppliers');
+payment_terms_list_cells('Terms:', 'payment_terms', null, 'All');
+check_cells('Show Over Due Only','overdue_only');
+// end_row();
+// start_row();
+br();
+check_cells('Use Due Date','use_duedate');
+date_cells(_("From:"), 'TransAfterDate', '', null, -3);
+date_cells(_("To:"), 'TransToDate', '',null);
+// check_cells('CV for online processing only','op_cv_only');	
+$items = array();
+$items['0'] = 'All';
+$items['1'] = 'Not yet Approved';
+$items['2'] = 'Approved but Pending';
+$items['3'] = 'For online payment only';
+$items['4'] = 'With Issued Checks only';
+$items['5'] = 'Paid Online only';
+$items['6'] = 'PBCOM Payment';
+$items['7'] = 'Paid w/ PBCOM only';
+$items['8'] = 'PBCOM ACA';
+$items['9'] = 'Paid w/ PBCOM ACA';
+
+label_cells('Status:',array_selector('status', null, $items, array() ));
+
+$print = array();
+$print['3'] = 'All';
+$print['1'] = 'Printed';
+$print['2'] = 'Not yet Printed';
+
+
+// label_cells('Print Status:',array_selector('print_status', null, $print, array() ));
+
+
+yesno_list_cells('Hide DR: ', 'hide_dr');
+submit_cells('Refresh_Inquiry', _("Search"),'',_('Refresh Inquiry'), false);
+echo '</center>';
+// end_row();
+// end_table();
+
+//------------------------------------------------------------------------------------------------
+
+function get_transactions()
+{
+    $date_after = date2sql($_POST['TransAfterDate']);
+    $date_to = date2sql($_POST['TransToDate']);
+	
+	// $type = ($_POST['trans_type']);
+	$type = -1;
+	// $reference = ($_POST['reference']);
+	$cv_no = ($_POST['cv_no']);
+	// $print_status = $_POST['print_status'];
+	
+	$u_date = 'x.cv_date';
+	
+	if (check_value('use_duedate'))
+		$u_date = 'x.due_date';
+	
+	if ($type == -1)
+	{
+		$add_me = '';
+		if ($cv_no != '')
+		{
+			$sql = "SELECT * FROM ".TB_PREF."cv_header x ";
+			$res = db_query($sql);
+			
+			$where = " WHERE x.cv_no = ".db_escape($cv_no)."";
+			
+			if (db_num_rows($res) == 0)
+			{
+				$add_me = " AND x.cv_no LIKE (".db_escape('%'.$cv_no.'%').")";
+				$cv_no = '';
+			}
+		}
+			
+		if ($cv_no == '')
+		{
+			$sql = "SELECT * FROM ".TB_PREF."cv_header x";
+			$where = " WHERE $u_date >= '$date_after'
+				AND $u_date <= '$date_to' 
+				$add_me";
+			
+			switch($_POST['status'])
+			{
+				case 0: // all
+				break;
+				case 1: // not yet approved
+					$where .= " AND x.bank_trans_id = 0 AND x.approved = 0 AND x.amount > 0";
+				break;	
+				case 2: // approved but no check OR not yet tagged for BPS
+					$where .= " AND x.bank_trans_id = 0 AND x.approved = 1 AND x.online_payment = 0 AND x.online_check_payment = 0 AND x.amount > 0
+						 AND x.person_id NOT IN (SELECT supplier_id 
+								FROM ".TB_PREF."suppliers WHERE billing_institution_code != '')	";
+					// CHECK FOR PRINTED CV
+					// if ($print_status == 1) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 1 AND amount > 0";
+					// }
+					// else if ($print_status == 2) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 0";
+					// }
+				break;
+				case 3: //for online only
+					$where .= " AND x.amount > 0
+							  AND x.bank_trans_id = 0 AND x.approved = 1
+							  AND x.person_id IN (SELECT supplier_id 
+								FROM ".TB_PREF."suppliers WHERE billing_institution_code != '' AND billing_institution_code != 'PBCOM' AND billing_institution_code  LIKE 'COM%')	";
+					// CHECK FOR PRINTED CV
+					// if ($print_status == 1) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 1 AND amount > 0";
+					// }
+					// else if ($print_status == 2) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 0 AND amount > 0";
+					// }
+				break;
+				case 4: // with checks only
+					$where .= " AND x.bank_trans_id != 0 AND x.approved = 1 AND x.online_payment = 0 AND x.online_check_payment = 0 ";
+					// CHECK FOR PRINTED CHECKS
+					// if ($print_status == 1) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 1";
+					// }
+					// else if ($print_status == 2) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 0";
+					// }
+				break;
+				case 5: // paid online only
+					$where .= " AND x.bank_trans_id != 0 AND x.approved = 1 AND x.online_payment = 2";
+					// CHECK FOR PRINTED CHECKS
+					// if ($print_status == 1) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 1";
+					// }
+					// else if ($print_status == 2) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 0";
+					// }
+				break;
+				
+				case 6: //for pbcom payment only
+					$where .= " AND x.amount > 0
+							  AND x.bank_trans_id = 0 AND x.approved = 1
+							  AND x.person_id IN (SELECT supplier_id 
+								FROM ".TB_PREF."suppliers WHERE billing_institution_code != '' AND billing_institution_code = 'PBCOM' AND billing_institution_code NOT LIKE 'COM%')";
+					// CHECK FOR PRINTED CV
+					// if ($print_status == 1) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 1 AND amount > 0";
+					// }
+					// else if ($print_status == 2) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 0 AND amount > 0";
+					// }
+				break;
+				
+				case 7: // paid with pbcom only
+					$where .= " AND x.bank_trans_id != 0 AND x.approved = 1 AND x.online_check_payment = 2";
+					// CHECK FOR PRINTED CHECKS
+					// if ($print_status == 1) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 1";
+					// }
+					// else if ($print_status == 2) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 0";
+					// }
+				break;
+				
+				case 8: //for pbcom ACA payment only
+					$where .= " AND x.amount > 0
+							  AND x.bank_trans_id = 0 AND x.approved = 1
+							  AND x.person_id IN (SELECT supplier_id 
+								FROM ".TB_PREF."suppliers WHERE billing_institution_code != '' AND billing_institution_code NOT LIKE '%COM%') ";
+					// CHECK FOR PRINTED CV
+					// if ($print_status == 1) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 1 AND amount > 0";
+					// }
+					// else if ($print_status == 2) // printed CV only
+					// {
+						// $sql .= " AND cv_printed = 0 AND amount > 0";
+					// }
+				break;
+				
+				case 9: // paid with pbcom ACA only
+					$where .= " AND x.bank_trans_id != 0 AND x.approved = 1 AND x.online_aca_payment = 2";
+					// CHECK FOR PRINTED CHECKS
+					// if ($print_status == 1) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 1";
+					// }
+					// else if ($print_status == 2) // printed CHECKS only
+					// {
+						// $sql .= " AND check_printed = 0";
+					// }
+				break;
+				
+				
+			}
+		}
+		
+		if ($_POST['supplier_id'] != '')
+			$where .= " AND x.person_id = ".$_POST['supplier_id']."";
+		
+		if ($_POST['payment_terms'] != 0)
+		{
+			$where .= " AND x.person_id IN (SELECT yyy.supplier_id FROM 0_suppliers yyy WHERE yyy.payment_terms = ".$_POST['payment_terms'].")";
+		}
+		
+		 //display_error($sql);
+		// return db_query($sql.$where,"No supplier transactions were returned");
+		return array($sql,$where);
+	}
+	// else
+	// {
+		// $sql = "SELECT DISTINCT a.* FROM ".TB_PREF."cv_header a, ".TB_PREF."cv_details b
+				// WHERE a.id = b.cv_id
+				// AND b.trans_type = $type";
+		
+		// // if ($reference != '')
+			// // $sql .= " AND trans_no IN (".get_ids($type, $reference).")";
+		
+		// if (check_value('op_cv_only'))
+			// $sql .= " AND online_payment = 1";
+			
+		// // display_error($sql);
+		// $res = db_query($sql);
+		
+		// if (db_num_rows($res) == 0)
+		// {	display_error('No CV found for that transaction');
+			// return false;
+		// }
+		
+		// return $res;
+	// }
+}
+
+
+function get_cwo_po_and_pr($cv_id)
+{
+$sql = "SELECT * FROM ".TB_PREF."cwo_header WHERE c_cv_id='$cv_id'";
+//display_error($sql);	
+$res=db_query($sql);
+$row=db_fetch($res);
+
+$po_num=$row['c_po_no'];
+$pr_num=$row['c_pr_no'];
+
+return array ($po_num,$pr_num);
+}
+
+//------------------------------------------------------------------------------------------------
+
+function get_po_ref($cv_id)
+{
+$sql = "SELECT * FROM ".TB_PREF."supp_trans WHERE type = '20' and  cv_id='$cv_id'";
+//display_error($sql);	
+$res=db_query($sql);
+$row=db_fetch($res);
+
+$po_ref=$row['reference'];
+$po_ref_s=$row['special_reference'];
+
+return array ($po_ref,$po_ref_s);
+}
+function check_cv_id($cv_id)
+{
+
+	$sql = "SELECT * FROM ".TB_PREF."cv_on_hold
+			WHERE cleared = 0 AND cv_id =".$cv_id;
+	$res = db_query($sql);
+	$row=db_fetch($res);
+	return $row;
+}
+
+//------------------------------------------------------------------------------------------------
+
+if(get_post('Refresh_Inquiry') OR $_POST['cv_no'] != '')
+{
+	$Ajax->activate('trans_tbl');
+	$Ajax->activate('totals_tbl');
+}
+
+if (list_updated('print_all_cv') OR list_updated('print_all_checks'))
+{
+	global $Ajax;
+	$Ajax->activate('trans_tbl');
+}
+
+//------------------------------------------------------------------------------------------------
+global $systypes_array;
+/*show a table of the transactions returned by the sql */
+
+div_start('trans_tbl');
+
+// display_error(isset($_POST['Refresh_Inquiry']));
+// if (!isset($_POST['Refresh_Inquiry']))
+	// display_footer_exit();
+
+list($sql,$where) = get_transactions();
+$result = db_query($sql.$where,"No supplier transactions were returned");
+
+print_hidden_cheque_script();
+if (db_num_rows($result) == 0)
+{
+	display_note(_("There are no transactions to display for the given dates."), 1, 1);
+} else
+{
+
+	start_table("$table_style2 width=80% align=center");	
+		
+	$th = array('Receiving#','Status');
+	
+	
+	if ($_POST['status'] == 6 AND strtolower($_SESSION['wa_current_user']->access) != 18)
+		array_push($th, 'For PBCOM payment <br>'.checkbox('', 'check_all_pb100', null, true, false));
+	else if ($_POST['status'] == 6)
+		array_push($th, '');
+	
+		if ($_POST['status'] == 8 AND strtolower($_SESSION['wa_current_user']->access) != 18)
+		array_push($th, 'For PBCOM ACA payment <br>'.checkbox('', 'check_all_pbaca100', null, true, false));
+	else if ($_POST['status'] == 8)
+		array_push($th, '');
+	
+	
+	if ($_POST['status'] == 3 AND strtolower($_SESSION['wa_current_user']->access) != 18)
+		array_push($th, 'For online payment <br>'.checkbox('', 'check_all_op100', null, true, false));
+	else if ($_POST['status'] == 3)
+		array_push($th, '');
+		
+	
+	if ($_POST['status'] == 2 AND strtolower($_SESSION['wa_current_user']->access) != 18)
+		array_push($th, submit('issue_checks', 'Issue Checks', false, 'Issue Check to tagged CV\s').'<br>'
+			.checkbox('', 'check_all_issue', null, true, false));
+	else if ($_POST['status'] == 2)
+		array_push($th, '');
+			
+	array_push($th,
+			submit('print_cvs', 'Print CVs', false, 'Print checked CV\'s').'<br>'.checkbox('', 'print_all_cv', null, true, false),
+			//_("Type"), 
+			_("Reference"), _("Payee"),
+			_("CV Date")); /*_("Currency"),*/
+			
+	if ($_POST['hide_dr'] == 0)
+		array_push($th,_("Delivery Date"));
+	
+	array_push($th,_("Amount"));
+			
+	array_push($th,"GL",'Void', 'Due Date');//,'Send Payment Notification');
+
+	 table_header($th);
+
+	if ($_POST['hide_dr'] == 0)
+		$cv_rr = get_all_cv_all_rr($where);
+	 
+	 $j = 1;
+	 $k = 0; //row colour counter
+	 
+	 while ($myrow = db_fetch($result))
+	 {
+		$cv_voided = get_voided_entry(ST_CV, $myrow["id"]);
+		$date = sql2date($myrow["cv_date"]);
+		
+		// get CV delivery date
+		$del_date = '';
+		$del_date = get_cv_del_date($myrow["id"]);
+		
+		if ($_POST['hide_dr'] == 0)
+		
+		$_POST['due_date_'.$myrow['id']] = sql2date($myrow["due_date"]);
+		
+		$overdue  = $superoverdue= false;
+		$overdue = date1_greater_date2(add_days(Today(),7), sql2date($myrow["due_date"]));
+		$superoverdue = date1_greater_date2(add_days(Today(),2), sql2date($myrow["due_date"]));
+		
+		//jade added
+		$array_cv   = getCvDate($myrow['person_id']);
+		$cv_amount = $array_cv[1];
+		$ccv_date  = end(explode(",",$date));
+		$ccv_date2 = end(explode(",",$array_cv[0]));
+		// end
+
+		if (check_value('overdue_only') AND ($myrow['bank_trans_id'] != 0 OR !$superoverdue))
+			continue;
+		
+		if ($myrow['bank_trans_id'] != 0) // paid
+			start_row("class='paidbg'");
+		else if ($superoverdue)
+		{
+			display_error($ccv_date.'='.$ccv_date2.'//'.$cv_amount);
+			if ($ccv_date == $ccv_date2 && $cv_amount != 0) { // jade added
+				start_row("style='background-color:#f1c40f'" );
+			} else {
+				start_row("class='superoverduebg'");
+			}
+
+			$due = true;
+		}
+		else if ($overdue)
+		{
+			display_error($cv_amount);
+			if ($ccv_date == $ccv_date2  && $cv_amount != 0) { // jade added
+				start_row("style='background-color:#f1c40f'" );
+			} else {
+				start_row("class='overduebg'");
+			}
+			// start_row("class='overduebg'");
+		} else if($ccv_date == $ccv_date2  && $cv_amount != 0) { // jade added
+					
+			start_row("style='background-color:#f1c40f'");
+		}
+		else
+		alt_table_row_color($k);
+
+		//Receiving#----
+		// if ($_POST['hide_dr'] == 0)
+		// label_cell('<b>'.implode(',',$cv_rr[$myrow["id"]]).'</b>','align=center');
+		// else
+		// label_cell('<i>hidden</i>','align=center');
+		
+		
+		if ($_POST['hide_dr'] == 0) {
+			$rec_no=implode(',',$cv_rr[$myrow["id"]]);
+			
+			if ($rec_no!=''){
+				label_cell('<b>'.$rec_no.'</b>','align=center');
+			}
+			else {
+				$cwo_cv_id=$myrow["id"];
+				$cwo_head=get_cwo_po_and_pr($cwo_cv_id);
+				
+				$cwo_po_no=$cwo_head[0];
+				$cwo_pr_no=$cwo_head[1];
+			
+				if ($cwo_po_no==''){
+					label_cell('<b>'.$cwo_pr_no.'</b>','align=center');
+				}
+				else {
+					label_cell('<b>'.$cwo_po_no.'</b>','align=center');
+				}
+			}
+		}
+
+		else{
+			label_cell('<i>hidden</i>','align=center');
+		}
+		
+		if (!$cv_voided)
+		{
+			if ($myrow['approved'] == 0) // not yet approved
+			{
+				label_cell('<b>CV For Approval</b>'.(($_SESSION['wa_current_user']->can_approve_cv) ?
+				' | '.
+				// button('approve_cv'.$myrow['id'], 'approve','Approve this CV', ICON_APPROVE)
+				submit('approve_cv'.$myrow['id'], 'Approve', false, 'Approve this CV', true, ICON_APPROVE)
+				: '')	, 'nowrap');
+				// edit_button_cell("approve_cv".$myrow['id'], _("Approve CV"), false, true)
+				// if ($_SESSION['wa_current_user']->can_approve_cv)
+					// edit_button_cell("approve_cv".$myrow['id'], _("Approve CV"), false, true);
+				// else
+					// label_cell('for approval');
+					
+			}
+			else  // approved
+			{
+				if ($myrow['bank_trans_id'] != 0) // check issued
+				{
+					$bank_row = get_bank_trans_of_cv($myrow['bank_trans_id']);
+
+					if ($myrow['online_payment'] == 0 AND $myrow['online_check_payment'] == 0 AND $myrow['online_aca_payment'] == 0)
+					{
+						label_cell('<b>Paid '.
+							print_document_cheque_link2($myrow['bank_trans_id'], show_check_details($myrow['bank_trans_id']), true, '')
+							.'</b>', 'nowrap');
+						// if ($_POST['status'] == 4)
+						// {
+							// // check_cells('','chk_prnt'.$myrow['bank_trans_id'],
+								// // check_value('print_all_checks'),false, '', "align='center'");
+							// echo "<td align='left' nowrap>";
+							// echo check(null, 'chk_prnt'.$myrow['bank_trans_id'],
+								// (isset($_POST['chk_prnt'.$myrow['bank_trans_id']]) ? 1 : check_value('print_all_checks'))
+								// ,false, ''). show_check_details($myrow['bank_trans_id']);
+							// echo "</td>";
+						// }
+						// else
+							// label_cell();
+						// label_cell(print_document_cheque_link2($myrow['bank_trans_id'], _("View Check"), true, ''));
+						
+					}
+
+					else if ($myrow['online_payment'] == 2)
+					{
+						if ($myrow["email_sent"] == 0)
+							// submit_cells('email'.$myrow["id"], '`e-mail', "nowrap align=right", false, false);
+							$email_str = submit('email'.$myrow["id"], 'Send e-mail', false, false, false,ICON_EMAIL);
+						else
+							// $email_str = submit('reemail'.$myrow["id"], 'Resend e-mail', false, false, false,ICON_EMAIL);
+							$email_str = '';
+						
+						label_cell('<b>Paid Online</b> &nbsp;&nbsp;&nbsp;'.$email_str);
+					}
+					
+					else if ($myrow['online_check_payment'] == 2)
+					{
+						if ($myrow["email_sent"] == 0)
+							// submit_cells('email'.$myrow["id"], '`e-mail', "nowrap align=right", false, false);
+							$email_str = submit('email'.$myrow["id"], 'Send e-mail', false, false, false,ICON_EMAIL);
+						else
+							// $email_str = submit('reemail'.$myrow["id"], 'Resend e-mail', false, false, false,ICON_EMAIL);
+							$email_str = '';
+						
+						label_cell("<b>Paid (Manager's Check)</b> &nbsp;&nbsp;&nbsp;".$email_str);
+					}
+					
+					else if ($myrow['online_aca_payment'] == 2)
+					{
+						if ($myrow["email_sent"] == 0)
+							// submit_cells('email'.$myrow["id"], '`e-mail', "nowrap align=right", false, false);
+							$email_str = submit('email'.$myrow["id"], 'Send e-mail', false, false, false,ICON_EMAIL);
+						else
+							// $email_str = submit('reemail'.$myrow["id"], 'Resend e-mail', false, false, false,ICON_EMAIL);
+							$email_str = '';
+						
+						label_cell("<b>Paid (ACA Manager's Check)</b> &nbsp;&nbsp;&nbsp;".$email_str);
+					}
+				}
+				else // no payment yet
+				{
+					if ($myrow['online_payment'] == 1 and $myrow['online_check_payment'] == 0 and $myrow['online_aca_payment'] == 0  and check_cv_id($myrow['id']) == '')
+					{
+						$_POST['for_op'.$myrow['id']] = 1;
+						label_cell('<b>for Online Payment</b>', 'nowrap');
+					}
+					else if ($myrow['online_payment'] == 1 and $myrow['online_check_payment'] == 0 and $myrow['online_aca_payment'] == 0 and check_cv_id($myrow['id']) != ''){
+						label_cell('<b>NOT YET CLEARED</b>','align=center');
+					}
+					else if ($myrow['online_check_payment'] == 1 and $myrow['online_payment'] == 0 and $myrow['online_aca_payment'] == 0 and check_cv_id($myrow['id']) == '')
+					{
+						$_POST['for_pb'.$myrow['id']] = 1;
+						label_cell('<b>for PBCOM Payment</b>', 'nowrap');
+					}
+					else if ($myrow['online_check_payment'] == 1 and $myrow['online_payment'] == 0 and $myrow['online_aca_payment'] == 0 and check_cv_id($myrow['id']) != ''){
+						label_cell('<b>NOT YET CLEARED</b>','align=center');
+					}
+					else if ($myrow['online_aca_payment'] == 1 and $myrow['online_payment'] == 0 and $myrow['online_check_payment'] == 0 and check_cv_id($myrow['id']) == '')
+					{
+						$_POST['for_pbaca'.$myrow['id']] = 1;
+						label_cell('<b>for PBCOM ACA Payment</b>', 'nowrap');
+					}
+					else if ($myrow['online_aca_payment'] == 1 and $myrow['online_payment'] == 0 and $myrow['online_check_payment'] == 0 and check_cv_id($myrow['id']) != ''){
+						label_cell('<b>NOT YET CLEARED</b>','align=center');
+					}
+					
+					else
+					{
+						unset($_POST['for_op'.$myrow['id']]);
+						unset($_POST['for_pb'.$myrow['id']]);
+						unset($_POST['for_pbaca'.$myrow['id']]);
+						label_cell('<b>CV Approved</b>', 'nowrap');
+					}
+					
+					
+					// $check_issue = "$path_to_root/modules/checkprint/check_issue_2.php?" . SID .	 "type_id=" . $myrow["type"] . "&amp;trans_no=" . $myrow["trans_no"];
+					if ($_POST['status'] == 3)
+					{
+						if (supplier_has_billing_institution_code($myrow['person_id']) AND strtolower($_SESSION['wa_current_user']->access) != 18)
+						{
+							check_cells('','for_op'.$myrow['id'],null,true, '', "align='center'");
+							hidden('for_check_all_op'.$myrow['id'],$myrow['id']);
+						}
+						else
+							label_cell('','align=center');
+					}// hyperlink_params_td("$path_to_root/modules/checkprint/srs_check_issue.php",'Issue Check','cv_id='.$myrow["id"]);
+					
+					if ($_POST['status'] == 6)
+					{
+						if (supplier_has_billing_institution_code($myrow['person_id']) AND strtolower($_SESSION['wa_current_user']->access) != 18)
+						{
+							check_cells('','for_pb'.$myrow['id'],null,true, '', "align='center'");
+							hidden('for_check_all_pb'.$myrow['id'],$myrow['id']);
+						}
+						else
+							label_cell('','align=center');
+					}// hyperlink_params_td("$path_to_root/modules/checkprint/srs_check_issue.php",'Issue Check','cv_id='.$myrow["id"]);
+					
+					if ($_POST['status'] == 8)
+					{
+						if (supplier_has_billing_institution_code($myrow['person_id']) AND strtolower($_SESSION['wa_current_user']->access) != 18)
+						{
+							check_cells('','for_pbaca'.$myrow['id'],null,true, '', "align='center'");
+							hidden('for_check_all_pbaca'.$myrow['id'],$myrow['id']);
+						}
+						else
+							label_cell('','align=center');
+					}// hyperlink_params_td("$path_to_root/modules/checkprint/srs_check_issue.php",'Issue Check','cv_id='.$myrow["id"]);
+				}
+			}
+				
+			// check_cells('','batch_cv_print'.$myrow['id'],check_value('print_all_cv'),false, '', "align='center'");
+			
+			if ($_POST['status'] == 2)
+			{
+				if (strtolower($_SESSION['wa_current_user']->access) != 18)
+				{
+					if(check_cv_id($myrow['id']) == ''){
+						echo '<td nowrap align=center>';
+						check('','batch_check_issue'.$myrow['id'], check_value('check_all_issue'), false, 'tag for multiple check issuance');
+					}else{	
+						label_cell('<b>NOT YET CLEARED</b>','align=center');
+					}
+					// echo "<a target=blank href='$path_to_root/modules/checkprint/cv_print.php?
+						// cv_id=".$myrow["id"]."'onclick=\"javascript:openWindow(this.href,this.target); return false;\">" .
+						// _("Print CV") . "&nbsp;</a> ";
+					echo '</td>';
+				}
+				else
+					label_cell();
+			}
+			// else
+			
+			echo '<td nowrap>';
+			check('','batch_cv_print'.$myrow['id'], 
+				( isset($_POST['batch_cv_print'.$myrow['id']]) ? '1' : check_value('print_all_cv')),false, 'tag for multiple printing');
+			
+			echo "<a target=blank href='$path_to_root/modules/checkprint/cv_print.php?
+				cv_id=".$myrow["id"]."'onclick=\"javascript:openWindow(this.href,this.target); return false;\">" .
+				_("Print CV") . "&nbsp;</a> ";							
+				
+			//	display_error($cwo_po_no);
+			if ($_POST['hide_dr'] == 0) {
+			
+			
+			$rec_no=implode(',',$cv_rr[$myrow["id"]]);
+				
+				  if($rec_no != ''){
+				
+						$ref_ = get_po_ref($myrow["id"]);
+						
+							$rec_no_ = str_pad($rec_no, 10, "0", STR_PAD_LEFT);
+							
+						if(get_po_attachment($ref_[1],$rec_no_))
+							echo "| <a target=blank href='".get_po_attachment($ref_[1],$rec_no_)."
+									'onclick=\"javascript:openWindow(href,target); return false;\">" .
+								_(" Invoice") . "&nbsp;</a> ";	
+							
+					}
+		
+			}		 
+				 
+			
+			if ($_SESSION["wa_current_user"]->company == 4  AND strtolower($_SESSION['wa_current_user']->access) != 18) // nova only
+				echo "| <a target=blank href='$path_to_root/modules/checkprint/cv_print.php?
+					cv_id=".$myrow["id"]."&is_belen_tan=0'onclick=\"javascript:openWindow(this.href,this.target); return false;\">" .
+					_("Print CV (Belen Tan)") . "&nbsp;</a> ";
+			
+			echo '</td>';
+		}
+		else
+		{
+			label_cell('<font color=red><b>CV VOIDED</b></font>', 'align=left');
+			echo '<td nowrap>';
+			check('','batch_cv_print'.$myrow['id'], 
+				( isset($_POST['batch_cv_print'.$myrow['id']]) ? '1' : check_value('print_all_cv')),false, 'tag for multiple printing');
+			echo "<a target=blank href='$path_to_root/modules/checkprint/cv_print.php?
+				cv_id=".$myrow["id"]."'onclick=\"javascript:openWindow(this.href,this.target); return false;\">" .
+				_("Print CV") . "&nbsp;</a> ";
+			echo '</td>';
+		}
+		
+		
+		// label_cell('Check Voucher');//$systypes_array[$myrow["type"]]);
+		// label_cell(get_trans_view_str($myrow["type"],$myrow["trans_no"]));
+		label_cell(get_cv_view_str($myrow["id"], $myrow["cv_no"]));
+		hidden('t_cv_no'.$myrow['id'],$myrow["cv_no"]);
+		$supp_n = payment_person_name($myrow["person_type"],$myrow["person_id"], false);
+		label_cell($supp_n);
+		hidden('t_cv_supp'.$myrow['id'],$supp_n);
+		label_cell($date);
+		
+		if ($_POST['hide_dr'] == 0)
+			label_cell($del_date);
+			
+		//label_cell($myrow["curr_code"]);
+		// if (abs($myrow["amount"]) >= 0)
+			// label_cell("");
+		if (!$cv_voided)
+		{
+			amount_cell(abs($myrow["amount"]));
+			hidden('t_cv_amt'.$myrow['id'],abs($myrow["amount"]));
+		}
+		else
+			amount_cell(get_cv_details_total($myrow["id"]));
+		// if (abs($myrow["amount"]) < 0)	
+			// label_cell("");
+
+		if ($myrow['bank_trans_id'] != 0)
+			label_cell(get_gl_view_str($bank_row["type"], $bank_row["trans_no"]),'align=center');
+		else
+			label_cell('');
+		
+		if($_SESSION['wa_current_user']->access == 16 OR $_SESSION['wa_current_user']->access == 6)
+			label_cell('');
+		else
+			{
+			if ($myrow['bank_trans_id'] != 0)
+			{
+				if(($myrow['bank_trans_id'] != 0 AND $myrow['online_payment'] != 2 AND $myrow['online_check_payment'] != 2  AND $myrow['online_aca_payment'] != 2) 
+					OR ($_SESSION['wa_current_user']->username == 'admin' OR (strtolower($_SESSION['wa_current_user']->username) == 'jent')))
+				{
+					$bank_trans_details = get_bank_trans_details($myrow["bank_trans_id"]);
+					label_cell("Payment <img style='cursor:pointer' title='Void' src='../../themes/modern/images/remove.png' 
+							onclick='openThickBox(".$bank_trans_details['trans_no'].", 
+							".$bank_trans_details['type'].",\"".$systypes_array[$bank_trans_details['type']]."\")'>",'nowrap');
+				}
+				else
+					label_cell('disabled');
+			}
+			else if (get_voided_entry(ST_CV, $myrow["id"]) === false) // add can void CV
+				label_cell("CV <img style='cursor:pointer' title='Void' src='../../themes/modern/images/remove.png' 
+						onclick='openThickBox(".$myrow["id"].", ".ST_CV.",\"".$systypes_array[ST_CV]."\")'>",'nowrap');
+			else
+			{
+				label_cell('');
+			}
+		}
+		if ($_SESSION['wa_current_user']->can_approve_cv AND ($myrow['bank_trans_id'] == 0) AND !$cv_voided)
+		{
+			// date_cells('', 'due_date_'.$myrow["id"], null, null, 0, 0, 0, 'nowrap', true);
+			label_cell(sql2date($myrow["due_date"]),'');
+		}
+		else
+			label_cell(sql2date($myrow["due_date"]),'');
+		
+		//================================= SENDING of notification thru email
+		// if ($myrow['bank_trans_id'] != 0 AND ($myrow['online_payment'] == 1 OR $myrow['online_payment'] == 2))// and supplier_got_email($myrow["person_id"]))
+		// {
+			// if ($myrow["email_sent"] == 0)
+				// submit_cells('email'.$myrow["id"], 'Send e-mail', "nowrap align=right", false, false);
+			// else
+				// submit_cells('reemail'.$myrow["id"], 'Resend e-mail', "nowrap align=right", false, false);
+		// }
+		end_row();
+
+		$j++;
+		// If ($j == 12)
+		// {
+			// $j=1;
+			// table_header($th);
+		// }
+	 //end of page full new headings if
+	 }
+	 
+	 $th[1]='';
+	 // $th[2]=submit('print_cvs', 'Print CVs', false, 'Print checked CV\'s');
+	 
+	 // table_header($th);
+	 //end of while loop
+
+	 end_table(1);
+	 
+	 if ($due)
+		display_note(_("Highlighted items are due."), 1, 0, "class='overduefg'");
+
+	if ($_POST['status'] == 3)
+	{
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+			submit_center('show_total', "Show/Refresh Total of checked CVs", true, false, false);
+		
+		div_start('total_table');
+		if (isset($_POST['show_total']))
+		{
+			start_table($table_style2);
+				$th_ = array('CV #', 'Supplier', 'Amount');
+				table_header($th_);
+				
+				$k = $op_cv_total = 0;
+				foreach($op_cvs as $op_cv)
+				{
+					$op_cv_total += $op_cv[2];
+					alt_table_row_color($k);
+					label_cell($op_cv[0]);
+					label_cell($op_cv[1]);
+					amount_cell($op_cv[2]);
+					end_row();
+				}
+				label_cell('<b>TOTAL:</b>','align=right colspan=2');
+				amount_cell($op_cv_total,true);
+				
+			end_table();
+		}
+		
+		div_end();
+		
+			
+		br();
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+		{
+			submit_center('process_online', "Generate CSV and Notify Supplier", true, false, false);
+			echo "<center>* this may take awhile.</center>";
+		}
+	}
+	// else if ($_POST['status'] == 4)
+	// {
+		// $sql = "SELECT MAX(batch_no) FROM ".TB_PREF."mb_ccws";
+		// $res = db_query($sql);
+		// $row = db_fetch($res);
+		
+		// if (!isset($_POST['mb_batch_no']))
+			// $_POST['mb_batch_no'] = $row[0]+1;
+			
+		
+		// submit_center_first('print_checks', "Download file for AUB Check Writer", 'Download Excel File', false, 'aub.png');
+		// amount_cells_ex('|| Batch No.', 'mb_batch_no', 2, 2, null, null, null, 0);
+		// date_cells('Trans Date:', 'transaction_date');
+		// submit_center_last('print_checks_metrobank', "Download file for Metrobank Check Writer", 'Download Text File', false, 'mb.png');
+	// }
+	
+	if ($_POST['status'] == 6)
+	{
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+			submit_center('show_pbcom_total', "Show/Refresh Total of checked CVs", true, false, false);
+		
+		div_start('total_table');
+		if (isset($_POST['show_pbcom_total']))
+		{
+			start_table($table_style2);
+				$th_ = array('CV #', 'Supplier', 'Amount');
+				table_header($th_);
+				
+				$k = $pb_cv_total = 0;
+				foreach($pb_cvs as $pb_cv)
+				{
+					$pb_cv_total += $pb_cv[2];
+					alt_table_row_color($k);
+					label_cell($pb_cv[0]);
+					label_cell($pb_cv[1]);
+					amount_cell($pb_cv[2]);
+					end_row();
+				}
+				label_cell('<b>TOTAL:</b>','align=right colspan=2');
+				amount_cell($pb_cv_total,true);
+				
+			end_table();
+		}
+		
+		div_end();
+		
+			
+		br();
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+		{
+			submit_center('process_pbcom', "Generate PBCOM File and Notify Supplier", true, false, false);
+			echo "<center>* this may take awhile.</center>";
+		}
+	}
+	
+	if ($_POST['status'] == 8)
+	{
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+			submit_center('show_pbcomaca_total', "Show/Refresh Total of checked CVs", true, false, false);
+		
+		div_start('total_table');
+		if (isset($_POST['show_pbcomaca_total']))
+		{
+			start_table($table_style2);
+				$th_ = array('CV #', 'Supplier', 'Amount');
+				table_header($th_);
+				
+				$k = $pbaca_cv_total = 0;
+				foreach($pbaca_cvs as $pbaca_cv)
+				{
+					$pbaca_cv_total += $pbaca_cv[2];
+					alt_table_row_color($k);
+					label_cell($pbaca_cv[0]);
+					label_cell($pbaca_cv[1]);
+					amount_cell($pbaca_cv[2]);
+					end_row();
+				}
+				label_cell('<b>TOTAL:</b>','align=right colspan=2');
+				amount_cell($pbaca_cv_total,true);
+				
+			end_table();
+		}
+		
+		div_end();
+		
+			
+		br();
+		if (strtolower($_SESSION['wa_current_user']->access) != 18)
+		{
+			submit_center('process_pbcomaca', "Generate PBCOM ACA File and Notify Supplier", true, false, false);
+			echo "<center>* this may take awhile.</center>";
+		}
+	}
+
+}
+
+// echo '<br>';
+// submit_center('print_cvs', "Print checked CV's", true, false, true);
+
+div_end();
+end_form();
+
+end_page();
+?>

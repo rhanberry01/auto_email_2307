@@ -1,0 +1,107 @@
+<?php
+/**********************************************************************
+    Copyright (C) FrontAccounting, LLC.
+	Released under the terms of the GNU General Public License, GPL, 
+	as published by the Free Software Foundation, either version 3 
+	of the License, or (at your option) any later version.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  
+    See the License here <http://www.gnu.org/licenses/gpl-3.0.html>.
+***********************************************************************/
+$page_security = 'SA_GLSETUP';
+
+$path_to_root = "..";
+include($path_to_root . "/includes/session.inc");
+
+include($path_to_root . "/includes/ui.inc");
+
+$js = "";
+if ($use_popup_windows)
+	$js .= get_js_open_window(900, 600);
+if ($use_date_picker)
+	$js .= get_js_date_picker();
+
+	
+page('create transfer in transit', false, false, "", $js);
+set_time_limit(0);
+//-----------------------------------------------------------------------------------
+function create_journals($trans_type,$tran_date,$debit_account,$credit_account,$memo_,$amount)
+{
+	global $Refs;
+	//====================
+	// CREATE NEW JOURNAL ENTRY
+    $trans_id = get_next_trans_no($trans_type);
+	$reference = get_next_reference($trans_type);
+	
+	
+	$debit = add_gl_trans($trans_type, $trans_id, $tran_date, $debit_account, 0, 0, $memo_, $amount);
+	$credit = add_gl_trans($trans_type, $trans_id, $tran_date, $credit_account, 0, 0, $memo_, -$amount);
+	//====================
+	$Refs->save($trans_type, $trans_id, $reference);
+	add_audit_trail($trans_type, $trans_id, $tran_date);
+	
+	return $trans_id;
+	// return $reference;
+}
+
+function searchForId($id, $array) {
+   foreach ($array as $key => $val) {
+       if ($val['dbname'] === $id) {
+           return $key;
+       }
+   }
+   return null;
+}
+
+function get_active_db(){
+
+    $sql='SELECT DATABASE()';
+
+    $sqlresult=mysql_query($sql);
+
+    $row=mysql_fetch_row($sqlresult);
+
+    $active_db=$row[0];
+
+    return "Active Database :<b> $active_db</b> ";
+
+    }
+	
+if (isset($_POST['fix_now']))
+{
+	global $db;
+	begin_transaction();
+	
+	$sql = "SELECT branch_in, br_out as due_to_branch, SUM(round(amount_in,2)) as for_adj, b.gl_stock_from as due_to, c.aria_db
+				FROM transfers.transfers_2015_2016 a
+				JOIN transfers.0_branches b ON a.br_out = b.`name`
+				JOIN transfers.0_branches c ON a.branch_in= c.`name`
+				GROUP BY br_out, branch_in
+				ORDER BY branch_in";
+	$res = db_query($sql);
+	
+	$in_transit = '570003';
+	
+	while($row = db_fetch($res))
+	{
+		mysql_select_db($row["aria_db"],$db);
+		
+		// display_error(get_active_db());
+		$memo_ = 'Transfer in transit due to '. $row['due_to_branch'];
+		create_journals('0','12/31/2015',$in_transit,$row['due_to'],$memo_,$row['for_adj']);
+		$memo_ = 'reverse transfer in transit due to '. $row['due_to_branch'];
+		create_journals('0','01/01/2016',$row['due_to'],$in_transit,$memo_,$row['for_adj']);
+	}
+	
+	display_notification('success'):
+	commit_transaction();
+}
+
+start_form();
+start_table($table_style2);
+submit_center('fix_now', 'GO');
+end_form();
+
+end_page();
+?>
